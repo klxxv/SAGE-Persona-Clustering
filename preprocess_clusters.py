@@ -34,7 +34,6 @@ except ImportError:
 def get_text_corpus(df):
     """Convert the dataframe of words into a list of sentences for Word2Vec."""
     print(">>> Building corpus for Word2Vec...")
-    # Group words by character as a proxy for context
     char_word_groups = df.groupby(['book', 'char_id'])['word'].apply(list)
     corpus = [words for words in char_word_groups if len(words) > 1]
     print(f"Corpus built with {len(corpus)} documents.")
@@ -48,24 +47,19 @@ def train_word2vec_embeddings(words, corpus, embedding_dim=100, workers=4):
         vector_size=embedding_dim,
         window=5,
         min_count=5,
-        sg=1,  # Using Skip-gram
+        sg=1,
         workers=workers
     )
     print("Word2Vec model trained.")
-    
     embedding_dict = {word: w2v_model.wv[word] for word in w2v_model.wv.index_to_key if word in words}
     print(f"Extracted {len(embedding_dict)} word vectors.")
     return embedding_dict
 
 def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=32):
-    """
-    Generate BERT embeddings for a list of words.
-    The user should replace 'bert-base-uncased' with the path to their downloaded model if needed.
-    """
+    """Generate BERT embeddings for a list of words."""
     print(f">>> Loading BERT model: {model_name}...")
     tokenizer = BertTokenizer.from_pretrained(model_name)
     model = BertModel.from_pretrained(model_name)
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
@@ -80,7 +74,6 @@ def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=32):
             inputs = tokenizer(batch, return_tensors='pt', padding=True, truncation=True).to(device)
             outputs = model(**inputs)
             embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
-            
             for word, embedding in zip(batch, embeddings):
                 word_vectors[word] = embedding
     
@@ -89,8 +82,7 @@ def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=32):
 
 def perform_kmeans(embedding_dict, n_clusters=1000, use_pca=False, pca_components=100):
     """
-    Perform K-Means clustering on a dictionary of word vectors.
-    Optionally applies PCA for dimensionality reduction before clustering.
+    Performs K-Means and adds the final vector representation to the output.
     """
     print(f">>> Performing K-Means clustering with {n_clusters} clusters...")
     
@@ -103,16 +95,16 @@ def perform_kmeans(embedding_dict, n_clusters=1000, use_pca=False, pca_component
         vectors = pca.fit_transform(vectors)
         print("PCA complete.")
     
-    kmeans = KMeans(
-        n_clusters=n_clusters,
-        random_state=42,
-        n_init=10
-    )
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     cluster_labels = kmeans.fit_predict(vectors)
+    
+    # Convert final vectors to a string format for CSV compatibility
+    vector_strings = [','.join(map(str, vec)) for vec in vectors]
     
     df_clusters = pd.DataFrame({
         "word": words,
-        "cluster_id": cluster_labels
+        "cluster_id": cluster_labels,
+        "vector": vector_strings
     })
     print("K-Means clustering complete.")
     return df_clusters
@@ -124,7 +116,7 @@ if __name__ == "__main__":
     OUTPUT_DIR = "fullset_data"
     BERT_MODEL_PATH = "bert-base-uncased"
     N_CLUSTERS = 1000
-    PCA_COMPONENTS = 100 # Target dimensions for PCA
+    PCA_COMPONENTS = 100
     
     # --- Main Logic ---
     print("--- Starting Vocabulary Preprocessing ---")
@@ -150,7 +142,6 @@ if __name__ == "__main__":
     # --- Method 2: BERT + K-Means with PCA ---
     print("\n--- Processing: BERT with PCA ---")
     bert_embeddings = get_bert_embeddings(unique_words, model_name=BERT_MODEL_PATH)
-    # Set use_pca=True for the BERT path
     df_bert_clusters = perform_kmeans(
         bert_embeddings, 
         n_clusters=N_CLUSTERS, 
