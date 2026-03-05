@@ -392,27 +392,42 @@ class LiteraryPersonaSAGE:
                             p_tensor = torch.full((V_total,), p_idx, device=self.device, dtype=torch.long)
                             all_word_log_probs[m_idx, p_idx, r_idx, :] = self.model(m_tensor, p_tensor, r_tensor, self.word_paths, self.word_signs)
 
+                # --- 优化：使用张量运算预计算所有角色的 Likelihood ---
+                print("  [E-Step] Pre-calculating character likelihoods...")
+                ll_matrix = torch.zeros((self.C, self.P), device=self.device)
+                
+                # 提取 df 里的所有索引
+                c_idx_arr = torch.tensor(df['c_idx'].values, device=self.device)
+                m_idx_arr = torch.tensor(df['m_idx'].values, device=self.device)
+                r_idx_arr = torch.tensor(df['r_idx'].values, device=self.device)
+                w_idx_arr = torch.tensor(df['w_idx'].values, device=self.device)
+                counts_arr = torch.tensor(df['count'].values, dtype=torch.float32, device=self.device)
+                
+                for p_idx in range(self.P):
+                    # 获取当前 persona 下所有词的 log_prob: [N_rows]
+                    # all_word_log_probs: [M, P, R, V]
+                    probs_p = all_word_log_probs[m_idx_arr, p_idx, r_idx_arr, w_idx_arr]
+                    
+                    # 乘以频次: [N_rows]
+                    weighted_probs = probs_p * counts_arr
+                    
+                    # 按照 c_idx 聚合求和: [C]
+                    ll_matrix[:, p_idx].index_add_(0, c_idx_arr, weighted_probs)
+                
+                ll_matrix = ll_matrix.cpu().numpy()
+                # ---------------------------------------------------------
+
                 for book in tqdm(unique_books, desc="  [E-Step] Gibbs Sampling"):
                     char_indices = np.where(char_to_book == book)[0]
                     if len(char_indices) == 0: continue
-                    m_d = char_to_m[char_indices[0]]
                     
                     for c in char_indices:
                         old_p = self.p_assignments[c]
                         self.book_persona_counts[book][old_p] -= 1
                         
                         prior = np.log(self.book_persona_counts[book] + self.alpha)
+                        ll = ll_matrix[c, :] # 直接使用预计算的结果
                         
-                        # 收集该角色出现的所有词及频次
-                        c_data = df[df['c_idx'] == c]
-                        ll = np.zeros(self.P)
-                        
-                        for p_idx in range(self.P):
-                            log_p = 0.0
-                            for _, row in c_data.iterrows():
-                                log_p += all_word_log_probs[m_d, p_idx, row['r_idx'], row['w_idx']].item() * row['count']
-                            ll[p_idx] = log_p
-                            
                         post_logits = prior + ll
                         # 减去最大值防止溢出
                         post_logits -= np.max(post_logits)
