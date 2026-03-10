@@ -18,6 +18,26 @@ def sinkhorn_distance_batch(P, Q, M, eps=0.01, max_iter=100):
     
     K_kernel = torch.exp(-M / eps)
     
+    # ---------------------------------------------------------
+    # 【硬件适配】：尝试使用 Intel NPU 加速矩阵乘法核
+    # ---------------------------------------------------------
+    use_npu = False
+    try:
+        import intel_npu_acceleration_library
+        # 建立一个微型线性算子用于 NPU 上的矩阵相乘
+        class MatMulNPU(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+            def forward(self, A, B):
+                return torch.matmul(A, B)
+        
+        mm_kernel = intel_npu_acceleration_library.compile(MatMulNPU(), dtype=torch.float16)
+        use_npu = True
+        print(">>> [Metrics] Sinkhorn kernel accelerated by Intel NPU.")
+    except:
+        pass
+    # ---------------------------------------------------------
+
     # 结果容器 [C, K]
     results = torch.zeros((P.shape[0], Q.shape[0]), device=device)
     
@@ -32,8 +52,16 @@ def sinkhorn_distance_batch(P, Q, M, eps=0.01, max_iter=100):
             
             u = torch.ones_like(P_batch) / P_batch.shape[-1]
             for _ in range(30): # 简化迭代次数加速搜索
-                v = Q_j / (torch.matmul(u, K_kernel) + 1e-8)
-                u = P_batch / (torch.matmul(v, K_kernel.t()) + 1e-8)
+                if use_npu:
+                    # NPU 路径 (使用 compiled mm_kernel)
+                    # 注意：需要将输入转为 fp16
+                    u16, K16, KT16 = u.half(), K_kernel.half(), K_kernel.t().half()
+                    v = Q_j / (mm_kernel(u16, K16).float() + 1e-8)
+                    v16 = v.half()
+                    u = P_batch / (mm_kernel(v16, KT16).float() + 1e-8)
+                else:
+                    v = Q_j / (torch.matmul(u, K_kernel) + 1e-8)
+                    u = P_batch / (torch.matmul(v, K_kernel.t()) + 1e-8)
             
             dist = torch.sum(u * torch.matmul(v * K_kernel, M.t()), dim=-1)
             results[i:i+batch_size, j] = dist

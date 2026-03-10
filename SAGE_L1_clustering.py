@@ -17,62 +17,134 @@ import torch.nn.functional as F
 # ==========================================
 class OWLQN(torch.optim.Optimizer):
     """
-    Orthant-Wise Limited-memory Quasi-Newton (OWL-QN)
-    用于精确求解带有 L1 正则化的目标函数 (Andrew and Gao, 2007)
+    改进版 Orthant-Wise Limited-memory Quasi-Newton (OWL-QN) 近似实现
+    结合了伪梯度(Pseudo-gradient)、正交象限投影(Orthant Projection) 以及简单的回溯线搜索(Backtracking Line Search)
     """
-    def __init__(self, params, lr=1.0, l1_lambda=0.1):
-        defaults = dict(lr=lr, l1_lambda=l1_lambda)
+    def __init__(self, params, lr=1.0, l1_lambda=1.0, c1=1e-4, beta=0.5):
+        if lr < 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        defaults = dict(lr=lr, l1_lambda=l1_lambda, c1=c1, beta=beta)
         super(OWLQN, self).__init__(params, defaults)
 
     def _pseudo_gradient(self, w, g, l1_lambda):
-        """计算伪梯度 (Pseudo-gradient)"""
+        """
+        计算次梯度/伪梯度 (Pseudo-gradient)
+        处理 L1 正则化在 0 点不可导的问题
+        """
+        if l1_lambda == 0.0:
+            return g # 对于没有正则化的参数组（如 eta_bg），直接返回原始梯度
+
         pg = torch.zeros_like(g)
-        # w < 0 的正交象限
+        
+        # w < 0 的象限
         idx_neg = w < 0
         pg[idx_neg] = g[idx_neg] - l1_lambda
-        # w > 0 的正交象限
+        
+        # w > 0 的象限
         idx_pos = w > 0
         pg[idx_pos] = g[idx_pos] + l1_lambda
-        # w == 0 的正交象限
-        idx_zero = w == 0
-        pg_zero = torch.zeros_like(g[idx_zero])
         
+        # w == 0 的象限
+        idx_zero = w == 0
         g_zero = g[idx_zero]
+        pg_zero = torch.zeros_like(g_zero)
+        
+        # 只有当原始梯度大于 L1 惩罚时，才会在 0 点产生向左或向右的梯度
         pg_zero[g_zero + l1_lambda < 0] = g_zero[g_zero + l1_lambda < 0] + l1_lambda
         pg_zero[g_zero - l1_lambda > 0] = g_zero[g_zero - l1_lambda > 0] - l1_lambda
+        
         pg[idx_zero] = pg_zero
         return pg
 
-    def _project_to_orthant(self, x, x_old):
-        """将权重投影回原本的正交象限，若跨越坐标轴则截断为0"""
-        sign_x = torch.sign(x)
-        sign_x_old = torch.sign(x_old)
-        # 如果符号发生改变（从正到负或负到正），强制截断为 0
-        zero_mask = (sign_x * sign_x_old) < 0
-        x[zero_mask] = 0.0
-        return x
+    def _project_to_orthant(self, x, x_old, pg):
+        """
+        将更新后的权重投影回原本的正交象限
+        防止跨越坐标轴改变符号，如果符号改变则强制截断为 0
+        """
+        # 定义目标象限：由当前变量所在的象限或伪梯度的反方向决定
+        orthant = torch.sign(x_old)
+        orthant[orthant == 0] = torch.sign(-pg[orthant == 0])
+        
+        # 将跨越象限的值截断为 0
+        x_projected = x.clone()
+        cross_mask = (torch.sign(x_projected) * orthant) < 0
+        x_projected[cross_mask] = 0.0
+        
+        return x_projected
 
+    @torch.no_grad()
     def step(self, closure):
-        """执行一步 OWL-QN 更新"""
-        loss = closure()
+        """
+        执行单步 OWL-QN 更新，包含闭包求值和线搜索
+        """
+        if closure is None:
+            raise RuntimeError("OWL-QN requires a closure to evaluate loss for line search.")
+            
+        # 1. 计算初始 Loss 和梯度
+        with torch.enable_grad():
+            loss = closure()
+            
+        initial_loss = loss.item()
+
+        # 保存当前参数和计算出的伪梯度
+        p_olds = []
+        pgs = []
+        
         for group in self.param_groups:
             l1_lambda = group['l1_lambda']
+            for p in group['params']:
+                if p.grad is None:
+                    p_olds.append(None)
+                    pgs.append(None)
+                    continue
+                    
+                p_olds.append(p.clone())
+                pg = self._pseudo_gradient(p, p.grad, l1_lambda)
+                pgs.append(pg)
+
+        # 2. 回溯线搜索 (Backtracking Line Search) 确保充分下降
+        idx = 0
+        for group in self.param_groups:
             lr = group['lr']
+            beta = group['beta'] # 步长衰减率
+            l1_lambda = group['l1_lambda']
             
             for p in group['params']:
                 if p.grad is None:
+                    idx += 1
                     continue
-                # 获取伪梯度
-                pg = self._pseudo_gradient(p.data, p.grad.data, l1_lambda)
                 
-                # 更新前的参数
-                p_old = p.data.clone()
+                p_old = p_olds[idx]
+                pg = pgs[idx]
                 
-                # 按照伪梯度进行梯度下降更新
-                p.data.add_(pg, alpha=-lr)
+                current_lr = lr
+                max_ls_iters = 10 # 最大线搜索次数
                 
-                # 正交象限投影 (保证不会越过 0 边界)
-                p.data = self._project_to_orthant(p.data, p_old)
+                for ls_iter in range(max_ls_iters):
+                    # 尝试走一步
+                    p.copy_(p_old)
+                    p.add_(pg, alpha=-current_lr)
+                    
+                    # 正交投影
+                    p.copy_(self._project_to_orthant(p, p_old, pg))
+                    
+                    # 计算尝试步之后的 loss
+                    with torch.enable_grad():
+                        new_loss = closure()
+                        
+                    # L1 正则化的目标值计算
+                    l1_penalty_old = l1_lambda * p_old.abs().sum()
+                    l1_penalty_new = l1_lambda * p.abs().sum()
+                    
+                    # 简单的充分下降条件检查 (Armijo rule 简化版)
+                    if new_loss.item() + l1_penalty_new <= initial_loss + l1_penalty_old:
+                        break # 找到了合适的步长
+                        
+                    # 否则衰减学习率
+                    current_lr *= beta
+                    
+                idx += 1
+
         return loss
 
 # ==========================================
@@ -316,8 +388,28 @@ class LiteraryPersonaSAGE:
 
         self.model = HierarchicalSAGE(self.M, self.P, self.R, num_internal_nodes).to(self.device)
         
-        # 替换为真实的 OWL-QN 优化器
-        optimizer = OWLQN(self.model.parameters(), lr=1.0, l1_lambda=self.l1_lambda)
+        # ---------------------------------------------------------
+        # 【硬件适配】：尝试使用 Intel NPU 加速模型前向传播
+        # ---------------------------------------------------------
+        try:
+            import intel_npu_acceleration_library
+            print(">>> [Hardware] Intel NPU detected. Compiling model for NPU...")
+            # NPU 通常对 float16 支持更好
+            self.model = intel_npu_acceleration_library.compile(self.model, dtype=torch.float16)
+        except (ImportError, Exception):
+            print(">>> [Hardware] Intel NPU not available or library missing. Falling back to optimized CPU (MKL/AVX).")
+        
+        # ---------------------------------------------------------
+        # 【修复】：将参数分为“需要正则化”和“不需要正则化”两组
+        # ---------------------------------------------------------
+        # 论文设定：meta 和 pers 受 Laplace 先验约束 (L1 正则化)，但 background bias 不受约束
+        regularized_params = [self.model.eta_meta, self.model.eta_pers]
+        unregularized_params = [self.model.eta_bg]
+        
+        optimizer = OWLQN([
+            {'params': regularized_params, 'l1_lambda': self.l1_lambda},
+            {'params': unregularized_params, 'l1_lambda': 0.0} # 背景偏置项正则化系数为0
+        ], lr=1.0)
 
         print(f">>> Starting Stochastic EM training ({self.iters} rounds)...")
         for it in range(self.iters):
