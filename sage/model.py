@@ -465,14 +465,53 @@ class LiteraryPersonaSAGE:
                 V_total = len(self.vocab_clusters)
                 all_word_log_probs = torch.zeros((self.M, self.P, self.R, V_total), device=self.device)
                 
-                for r_idx in range(self.R):
-                    r_tensor = torch.full((V_total,), r_idx, device=self.device, dtype=torch.long)
-                    for m_idx in range(self.M):
-                        m_tensor = torch.full((V_total,), m_idx, device=self.device, dtype=torch.long)
-                        for p_idx in range(self.P):
-                            p_tensor = torch.full((V_total,), p_idx, device=self.device, dtype=torch.long)
-                            all_word_log_probs[m_idx, p_idx, r_idx, :] = self.model(m_tensor, p_tensor, r_tensor, self.word_paths, self.word_signs)
+                # 优化：向量化前向传播，分块处理以控制内存
+                m_indices = torch.arange(self.M, device=self.device)
+                p_indices = torch.arange(self.P, device=self.device)
+                r_indices = torch.arange(self.R, device=self.device)
+                
+                # 创建全组合网格
+                grid_m, grid_p, grid_r = torch.meshgrid(m_indices, p_indices, r_indices, indexing='ij')
+                flat_m = grid_m.reshape(-1)
+                flat_p = grid_p.reshape(-1)
+                flat_r = grid_r.reshape(-1)
+                
+                num_combinations = flat_m.shape[0]
+                chunk_size = 500  # 控制内存开销
+                
+                for start_idx in range(0, num_combinations, chunk_size):
+                    end_idx = min(start_idx + chunk_size, num_combinations)
+                    batch_m = flat_m[start_idx:end_idx]
+                    batch_p = flat_p[start_idx:end_idx]
+                    batch_r = flat_r[start_idx:end_idx]
+                    
+                    # 扩展 w_idx 维度 [Batch, 1] -> [Batch, V]
+                    # 然后通过 self.model 处理所有词簇
+                    # 注意：HierarchicalSAGE 现在的 forward 是对单个 word 或 path 的
+                    # 我们需要为每个组合计算整个词表 V 的概率
+                    
+                    # 这里的 forward 逻辑需要适配全词表 V
+                    # 我们直接构造 [Batch * V] 的输入
+                    b_size = batch_m.shape[0]
+                    m_exp = batch_m.unsqueeze(1).expand(-1, V_total).reshape(-1)
+                    p_exp = batch_p.unsqueeze(1).expand(-1, V_total).reshape(-1)
+                    r_exp = batch_r.unsqueeze(1).expand(-1, V_total).reshape(-1)
+                    w_exp = torch.arange(V_total, device=self.device).repeat(b_size)
+                    
+                    # 获取 paths
+                    node_paths = self.word_paths[w_exp]
+                    node_signs = self.word_signs[w_exp]
+                    
+                    chunk_probs = self.model(m_exp, p_exp, r_exp, node_paths, node_signs)
+                    
+                    # 填回结果张量
+                    chunk_probs = chunk_probs.view(b_size, V_total)
+                    for i in range(b_size):
+                        idx = start_idx + i
+                        m_i, p_i, r_i = flat_m[idx], flat_p[idx], flat_r[idx]
+                        all_word_log_probs[m_i, p_i, r_i, :] = chunk_probs[i]
 
+                # 预计算 Likelihood Matrix
                 ll_matrix = torch.zeros((self.C, self.P), device=self.device)
                 c_idx_arr = torch.tensor(df['c_idx'].values, device=self.device)
                 m_idx_arr = torch.tensor(df['m_idx'].values, device=self.device)
@@ -486,18 +525,43 @@ class LiteraryPersonaSAGE:
                 
                 ll_matrix = ll_matrix.cpu().numpy()
 
-                for book in unique_books:
-                    char_indices = np.where(char_to_book == book)[0]
+                # 使用 joblib 并行化 Gibbs 采样
+                from joblib import Parallel, delayed
+                
+                def sample_single_book(book_id, b_unique_books, b_char_to_book, b_ll_matrix, b_p_assignments, b_book_persona_counts, b_alpha, b_P):
+                    char_indices = np.where(b_char_to_book == book_id)[0]
+                    local_assignments = {}
+                    local_counts = b_book_persona_counts[book_id].copy()
+                    
                     for c in char_indices:
-                        old_p = self.p_assignments[c]
-                        self.book_persona_counts[book][old_p] -= 1
-                        prior = np.log(self.book_persona_counts[book] + self.alpha)
-                        post_logits = prior + ll_matrix[c, :]
+                        old_p = b_p_assignments[c]
+                        local_counts[old_p] -= 1
+                        
+                        prior = np.log(local_counts + b_alpha)
+                        post_logits = prior + b_ll_matrix[c, :]
                         post_logits -= np.max(post_logits)
                         post_probs = np.exp(post_logits) / np.sum(np.exp(post_logits))
-                        new_p = np.random.choice(self.P, p=post_probs)
+                        
+                        new_p = np.random.choice(b_P, p=post_probs)
+                        local_assignments[c] = new_p
+                        local_counts[new_p] += 1
+                    return book_id, local_assignments, local_counts
+
+                # 预填充所有书籍的计数以确保线程安全
+                for b in unique_books: _ = self.book_persona_counts[b]
+
+                parallel_results = Parallel(n_jobs=-1, backend="threading")(
+                    delayed(sample_single_book)(
+                        book, unique_books, char_to_book, ll_matrix, self.p_assignments, 
+                        self.book_persona_counts, self.alpha, self.P
+                    ) for book in unique_books
+                )
+
+                # 写回结果
+                for book_id, local_assignments, local_counts in parallel_results:
+                    self.book_persona_counts[book_id] = local_counts
+                    for c, new_p in local_assignments.items():
                         self.p_assignments[c] = new_p
-                        self.book_persona_counts[book][new_p] += 1
                         
     def save_checkpoint(self, path, current_iter):
         checkpoint = {
