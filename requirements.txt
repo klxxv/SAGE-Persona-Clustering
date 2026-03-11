@@ -1,0 +1,19 @@
+# Core ML and Computation
+torch
+numpy
+scipy
+pandas
+
+# Parallelization
+joblib
+
+# Optimization
+tqdm
+
+# Analysis and Visualization
+scikit-learn
+matplotlib
+seaborn
+
+# Hardware Acceleration (Optional/Specific)
+# intel-npu-acceleration-library
