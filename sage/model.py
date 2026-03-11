@@ -356,7 +356,8 @@ class LiteraryPersonaSAGE:
         
         return df, num_internal_nodes
 
-    def fit(self, df, num_internal_nodes, resume_state=None):
+    def fit(self, df, num_internal_nodes, resume_state=None, checkpoint_dir=None, status_callback=None):
+        # ... (metadata setup)
         authors = sorted(df["author"].unique())
         self.m_map = {author: i for i, author in enumerate(authors)}
         self.M = len(authors)
@@ -398,15 +399,14 @@ class LiteraryPersonaSAGE:
         print(f"Authors (M): {self.M}, Roles (R): {self.R}, Chars (C): {self.C}")
 
         # ---------------------------------------------------------
-        # 【硬件适配】：尝试使用 Intel NPU 加速模型前向传播
+        # 【硬件适配】：暂时禁用 NPU 优化以确保稳定性
         # ---------------------------------------------------------
-        try:
-            import intel_npu_acceleration_library
-            print(">>> [Hardware] Intel NPU detected. Compiling model for NPU...")
-            # NPU 通常对 float16 支持更好
-            self.model = intel_npu_acceleration_library.compile(self.model, dtype=torch.float16)
-        except (ImportError, Exception):
-            pass # print(">>> [Hardware] Intel NPU not available. Falling back to optimized CPU.")
+        # try:
+        #     import intel_npu_acceleration_library
+        #     print(">>> [Hardware] Intel NPU detected. Compiling model for NPU...")
+        #     self.model = intel_npu_acceleration_library.compile(self.model)
+        # except Exception as e:
+        #     print(f">>> [Hardware] Intel NPU optimization failed: {e}")
         
         regularized_params = [self.model.eta_meta, self.model.eta_pers]
         unregularized_params = [self.model.eta_bg]
@@ -419,7 +419,18 @@ class LiteraryPersonaSAGE:
         print(f">>> Starting Stochastic EM training ({start_iter} to {self.iters} rounds)...")
         em_pbar = tqdm(range(start_iter, self.iters), desc=f"[EM P={self.P}]")
         for it in em_pbar:
-            em_pbar.set_postfix({"Alpha": f"{self.alpha:.4f}"})
+            current_alpha = self.alpha
+            em_pbar.set_postfix({"Alpha": f"{current_alpha:.4f}"})
+            
+            # 回报进度给父进程/仪表盘
+            if status_callback:
+                status_callback(it + 1, self.iters, f"Alpha={current_alpha:.4f}")
+
+            # 实时保存进度
+            if checkpoint_dir and it > start_iter and it % 5 == 0:
+                latest_path = os.path.join(checkpoint_dir, f"checkpoint_it{it}_temp.pt")
+                self.save_checkpoint(latest_path, it)
+                print(f"  [P={self.P}] Periodic checkpoint saved at iteration {it}")
             
             if (it + 1) % 5 == 0:
                 self.alpha = slice_sample_alpha(self.alpha, self.book_persona_counts, len(unique_books), self.P)
@@ -448,11 +459,15 @@ class LiteraryPersonaSAGE:
                 return loss
             
             prev_loss = float('inf')
-            tolerance = 1e-5  
-            max_m_steps = 200 
+            tolerance = 1e-4  # 稍微放宽收敛条件以加速
+            max_m_steps = 50  # 减少最大 M-Step 步数
             
             m_step_pbar = tqdm(range(max_m_steps), desc=f"  It {it+1} M-Step", leave=False)
             for m_step in m_step_pbar:
+                # 实时更新状态到仪表盘
+                if status_callback and m_step % 10 == 0:
+                    status_callback(it + 1, self.iters, f"M-Step: {m_step}/{max_m_steps} | Loss={prev_loss:.4f}")
+                
                 loss_val = optimizer.step(closure)
                 current_loss = loss_val.item()
                 m_step_pbar.set_postfix({"Loss": f"{current_loss:.4f}"})
@@ -462,22 +477,23 @@ class LiteraryPersonaSAGE:
             # --- E-STEP ---
             self.model.eval()
             with torch.no_grad():
+                if status_callback: status_callback(it + 1, self.iters, "E-Step: Precalculating...")
                 V_total = len(self.vocab_clusters)
                 all_word_log_probs = torch.zeros((self.M, self.P, self.R, V_total), device=self.device)
                 
-                # 优化：向量化前向传播，分块处理以控制内存
+                # 优化：向量化前向传播，分块处理以控制显存
                 m_indices = torch.arange(self.M, device=self.device)
                 p_indices = torch.arange(self.P, device=self.device)
                 r_indices = torch.arange(self.R, device=self.device)
                 
-                # 创建全组合网格
                 grid_m, grid_p, grid_r = torch.meshgrid(m_indices, p_indices, r_indices, indexing='ij')
                 flat_m = grid_m.reshape(-1)
                 flat_p = grid_p.reshape(-1)
                 flat_r = grid_r.reshape(-1)
                 
                 num_combinations = flat_m.shape[0]
-                chunk_size = 500  # 控制内存开销
+                # 在 GPU 上，chunk_size 需要根据显存动态调整
+                chunk_size = 200 if self.device.type == 'cuda' else 500
                 
                 for start_idx in range(0, num_combinations, chunk_size):
                     end_idx = min(start_idx + chunk_size, num_combinations)
@@ -485,34 +501,23 @@ class LiteraryPersonaSAGE:
                     batch_p = flat_p[start_idx:end_idx]
                     batch_r = flat_r[start_idx:end_idx]
                     
-                    # 扩展 w_idx 维度 [Batch, 1] -> [Batch, V]
-                    # 然后通过 self.model 处理所有词簇
-                    # 注意：HierarchicalSAGE 现在的 forward 是对单个 word 或 path 的
-                    # 我们需要为每个组合计算整个词表 V 的概率
-                    
-                    # 这里的 forward 逻辑需要适配全词表 V
-                    # 我们直接构造 [Batch * V] 的输入
                     b_size = batch_m.shape[0]
+                    # 确保扩展张量也在同一设备
                     m_exp = batch_m.unsqueeze(1).expand(-1, V_total).reshape(-1)
                     p_exp = batch_p.unsqueeze(1).expand(-1, V_total).reshape(-1)
                     r_exp = batch_r.unsqueeze(1).expand(-1, V_total).reshape(-1)
                     w_exp = torch.arange(V_total, device=self.device).repeat(b_size)
                     
-                    # 获取 paths
                     node_paths = self.word_paths[w_exp]
                     node_signs = self.word_signs[w_exp]
                     
                     chunk_probs = self.model(m_exp, p_exp, r_exp, node_paths, node_signs)
-                    
-                    # 填回结果张量
                     chunk_probs = chunk_probs.view(b_size, V_total)
-                    for i in range(b_size):
-                        idx = start_idx + i
-                        m_i, p_i, r_i = flat_m[idx], flat_p[idx], flat_r[idx]
-                        all_word_log_probs[m_i, p_i, r_i, :] = chunk_probs[i]
+                    
+                    all_word_log_probs[batch_m, batch_p, batch_r, :] = chunk_probs
 
                 # 预计算 Likelihood Matrix
-                ll_matrix = torch.zeros((self.C, self.P), device=self.device)
+                if status_callback: status_callback(it + 1, self.iters, "E-Step: Likelihood Matrix...")
                 c_idx_arr = torch.tensor(df['c_idx'].values, device=self.device)
                 m_idx_arr = torch.tensor(df['m_idx'].values, device=self.device)
                 r_idx_arr = torch.tensor(df['r_idx'].values, device=self.device)

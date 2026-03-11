@@ -29,9 +29,10 @@ def plot_persona_visualization(args):
     print(">>> Running t-SNE...")
     tsne = TSNE(n_components=2, perplexity=30, random_state=42)
     # 词簇列为 0-999
-    cluster_cols = [c for c in df_viz.columns if isinstance(c, int)]
-    if not cluster_cols: # 兜底逻辑：如果列名是字符串
-        cluster_cols = [c for c in df_viz.columns if str(c).isdigit()]
+    cluster_cols = [c for c in df_viz.columns if str(c).isdigit()]
+    if not cluster_cols:
+        # 尝试检测是否存在名为 '0', '1', ... 的列
+        cluster_cols = [str(i) for i in range(1000) if str(i) in df_viz.columns]
         
     X_embedded = tsne.fit_transform(df_viz[cluster_cols].values)
     

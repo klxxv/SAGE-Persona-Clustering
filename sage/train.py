@@ -5,19 +5,52 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
-from .model import LiteraryPersonaSAGE
-from .metrics import calculate_metrics, calculate_perplexity
+from model import LiteraryPersonaSAGE
+from metrics import calculate_metrics, calculate_perplexity
 import json
 import time
+
+import sys
 
 def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_nodes, cluster_centers, args, temp_model_meta):
     """
     Sub-process function to handle one specific n_personas across multiple iteration milestones.
     """
-    device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
-    results = []
+    # 1. 设置独立的标准输出到日志文件
     checkpoint_dir = os.path.join(args.output_dir, f"P{n_personas}")
     os.makedirs(checkpoint_dir, exist_ok=True)
+    log_file = open(os.path.join(checkpoint_dir, "process.log"), "a", buffering=1)
+    sys.stdout = log_file
+    sys.stderr = log_file
+
+    device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n>>> [Process P={n_personas}] Started on {device}")
+    
+    # 辅助函数：更新全局仪表盘
+    def update_live_status(current_it, total_it, status_text=""):
+        try:
+            status_file = os.path.join(args.output_dir, "live_status.txt")
+            # 我们用简单覆盖的方式更新，每行代表一个进程
+            lines = []
+            if os.path.exists(status_file):
+                with open(status_file, "r") as f: lines = f.readlines()
+            
+            new_line = f"P={n_personas:2d} | Iter: {current_it:3d}/{total_it:3d} | {status_text} | Time: {time.strftime('%H:%M:%S')}\n"
+            
+            # 更新或添加行
+            found = False
+            for i in range(len(lines)):
+                if lines[i].startswith(f"P={n_personas:2d}"):
+                    lines[i] = new_line
+                    found = True
+                    break
+            if not found: lines.append(new_line)
+            
+            with open(status_file, "w") as f: f.writelines(sorted(lines))
+        except: pass
+
+    results = []
+    # ... (rest of the logic)
     
     # Sort em_iters to ensure incremental training
     sorted_iters = sorted(em_iters_list)
@@ -60,7 +93,7 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
         model_engine.c_map = temp_model_meta['c_map']
         
         # Train
-        model_engine.fit(train_df, num_internal_nodes, resume_state=current_resume_state)
+        model_engine.fit(train_df, num_internal_nodes, resume_state=current_resume_state, checkpoint_dir=checkpoint_dir, status_callback=update_live_status)
         
         # Save checkpoint
         ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_it{target_iter}.pt")
