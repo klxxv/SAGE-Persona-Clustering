@@ -356,7 +356,7 @@ class LiteraryPersonaSAGE:
         
         return df, num_internal_nodes
 
-    def fit(self, df, num_internal_nodes):
+    def fit(self, df, num_internal_nodes, resume_state=None):
         authors = sorted(df["author"].unique())
         self.m_map = {author: i for i, author in enumerate(authors)}
         self.M = len(authors)
@@ -365,8 +365,6 @@ class LiteraryPersonaSAGE:
         c_map = {ck: i for i, ck in enumerate(char_keys)}
         self.C = len(char_keys)
         
-        print(f"Authors (M): {self.M}, Roles (R): {self.R}, Chars (C): {self.C}")
-
         # 将数据转为方便处理的张量结构
         df['m_idx'] = df['author'].map(self.m_map)
         df['c_idx'] = df['char_key'].map(c_map)
@@ -379,15 +377,26 @@ class LiteraryPersonaSAGE:
         char_to_book = temp_info['book'].values
         unique_books = temp_info['book'].unique()
 
-        # 预分配角色
-        np.random.seed(42)
-        self.p_assignments = np.random.randint(0, self.P, size=self.C)
-        self.book_persona_counts = defaultdict(lambda: np.zeros(self.P, dtype=int))
-        for c_idx in range(self.C):
-            self.book_persona_counts[char_to_book[c_idx]][self.p_assignments[c_idx]] += 1
-
         self.model = HierarchicalSAGE(self.M, self.P, self.R, num_internal_nodes).to(self.device)
-        
+
+        if resume_state:
+            print(f">>> Resuming from existing state (P={self.P})...")
+            self.model.load_state_dict(resume_state['model_weights'])
+            self.p_assignments = resume_state['p_assignments']
+            self.alpha = resume_state['alpha']
+            self.book_persona_counts = resume_state['book_persona_counts']
+            start_iter = resume_state['current_iter']
+        else:
+            # 预分配角色
+            np.random.seed(42)
+            self.p_assignments = np.random.randint(0, self.P, size=self.C)
+            self.book_persona_counts = defaultdict(lambda: np.zeros(self.P, dtype=int))
+            for c_idx in range(self.C):
+                self.book_persona_counts[char_to_book[c_idx]][self.p_assignments[c_idx]] += 1
+            start_iter = 0
+
+        print(f"Authors (M): {self.M}, Roles (R): {self.R}, Chars (C): {self.C}")
+
         # ---------------------------------------------------------
         # 【硬件适配】：尝试使用 Intel NPU 加速模型前向传播
         # ---------------------------------------------------------
@@ -397,37 +406,29 @@ class LiteraryPersonaSAGE:
             # NPU 通常对 float16 支持更好
             self.model = intel_npu_acceleration_library.compile(self.model, dtype=torch.float16)
         except (ImportError, Exception):
-            print(">>> [Hardware] Intel NPU not available or library missing. Falling back to optimized CPU (MKL/AVX).")
+            pass # print(">>> [Hardware] Intel NPU not available. Falling back to optimized CPU.")
         
-        # ---------------------------------------------------------
-        # 【修复】：将参数分为“需要正则化”和“不需要正则化”两组
-        # ---------------------------------------------------------
-        # 论文设定：meta 和 pers 受 Laplace 先验约束 (L1 正则化)，但 background bias 不受约束
         regularized_params = [self.model.eta_meta, self.model.eta_pers]
         unregularized_params = [self.model.eta_bg]
         
         optimizer = OWLQN([
             {'params': regularized_params, 'l1_lambda': self.l1_lambda},
-            {'params': unregularized_params, 'l1_lambda': 0.0} # 背景偏置项正则化系数为0
+            {'params': unregularized_params, 'l1_lambda': 0.0} 
         ], lr=1.0)
 
-        print(f">>> Starting Stochastic EM training ({self.iters} rounds)...")
-        for it in range(self.iters):
-            print(f"\n--- Round {it+1}/{self.iters} (Alpha: {self.alpha:.4f}) ---")
+        print(f">>> Starting Stochastic EM training ({start_iter} to {self.iters} rounds)...")
+        em_pbar = tqdm(range(start_iter, self.iters), desc=f"[EM P={self.P}]")
+        for it in em_pbar:
+            em_pbar.set_postfix({"Alpha": f"{self.alpha:.4f}"})
             
-            # --- 论文约束: 每 5 次迭代执行 Slice Sampling 动态调整 Alpha ---
             if (it + 1) % 5 == 0:
                 self.alpha = slice_sample_alpha(self.alpha, self.book_persona_counts, len(unique_books), self.P)
-                print(f"  [Hyper-param] Updated Dirichlet Alpha: {self.alpha:.4f}")
 
-            # --- M-STEP (最大化似然) ---
+            # --- M-STEP ---
             self.model.train()
-            
-            # 更新 df 里的 persona 标签
             p_map_df = pd.Series(self.p_assignments, index=np.arange(self.C))
             df['p_idx'] = df['c_idx'].map(p_map_df)
             
-            # 聚合相同 (m, p, r, w) 的计数以加速
             agg_df = df.groupby(['m_idx', 'p_idx', 'r_idx', 'w_idx'])['count'].sum().reset_index()
             
             m_idx_t = torch.tensor(agg_df['m_idx'].values, device=self.device)
@@ -435,7 +436,6 @@ class LiteraryPersonaSAGE:
             r_idx_t = torch.tensor(agg_df['r_idx'].values, device=self.device)
             w_idx_t = torch.tensor(agg_df['w_idx'].values, device=self.device)
             counts_t = torch.tensor(agg_df['count'].values, dtype=torch.float32, device=self.device)
-            
             total_tokens = counts_t.sum().item()
             
             def closure():
@@ -443,39 +443,28 @@ class LiteraryPersonaSAGE:
                 node_paths = self.word_paths[w_idx_t]
                 node_signs = self.word_signs[w_idx_t]
                 word_log_probs = self.model(m_idx_t, p_idx_t, r_idx_t, node_paths, node_signs)
-                # 使用 Negative Log Likelihood 作为目标
                 loss = -torch.sum(word_log_probs * counts_t)/total_tokens
                 loss.backward()
                 return loss
             
-            # 运行 OWL-QN
             prev_loss = float('inf')
-            tolerance = 1e-5  # 论文设定的绝对收敛阈值 
-            max_m_steps = 200 # 设置一个安全上限，防止极端情况下的震荡导致死循环
+            tolerance = 1e-5  
+            max_m_steps = 200 
             
-            print("  [M-Step] Optimizing parameters...")
-            for m_step in range(max_m_steps):
+            m_step_pbar = tqdm(range(max_m_steps), desc=f"  It {it+1} M-Step", leave=False)
+            for m_step in m_step_pbar:
                 loss_val = optimizer.step(closure)
                 current_loss = loss_val.item()
-                
-                # 检查绝对收敛条件：| L(t-1) - L(t) | < 1e-5
-                if abs(prev_loss - current_loss) < tolerance:
-                    print(f"  [M-Step] Converged at step {m_step + 1} (Loss diff: {abs(prev_loss - current_loss):.6e})")
-                    break
-                    
+                m_step_pbar.set_postfix({"Loss": f"{current_loss:.4f}"})
+                if abs(prev_loss - current_loss) < tolerance: break
                 prev_loss = current_loss
-                
-            l1_norm = (self.model.eta_meta.abs().sum() + self.model.eta_pers.abs().sum()).item()
-            print(f"  [M-Step] Final Avg NLL/Token: {current_loss:.4f} | L1 Norm: {l1_norm:.4f}")
             
-            # --- E-STEP (Collapsed Gibbs Sampling) ---
+            # --- E-STEP ---
             self.model.eval()
             with torch.no_grad():
-                # 预计算极大提升吉布斯采样效率
                 V_total = len(self.vocab_clusters)
                 all_word_log_probs = torch.zeros((self.M, self.P, self.R, V_total), device=self.device)
                 
-                # 为所有组合前向传播
                 for r_idx in range(self.R):
                     r_tensor = torch.full((V_total,), r_idx, device=self.device, dtype=torch.long)
                     for m_idx in range(self.M):
@@ -484,11 +473,7 @@ class LiteraryPersonaSAGE:
                             p_tensor = torch.full((V_total,), p_idx, device=self.device, dtype=torch.long)
                             all_word_log_probs[m_idx, p_idx, r_idx, :] = self.model(m_tensor, p_tensor, r_tensor, self.word_paths, self.word_signs)
 
-                # --- 优化：使用张量运算预计算所有角色的 Likelihood ---
-                print("  [E-Step] Pre-calculating character likelihoods...")
                 ll_matrix = torch.zeros((self.C, self.P), device=self.device)
-                
-                # 提取 df 里的所有索引
                 c_idx_arr = torch.tensor(df['c_idx'].values, device=self.device)
                 m_idx_arr = torch.tensor(df['m_idx'].values, device=self.device)
                 r_idx_arr = torch.tensor(df['r_idx'].values, device=self.device)
@@ -496,39 +481,35 @@ class LiteraryPersonaSAGE:
                 counts_arr = torch.tensor(df['count'].values, dtype=torch.float32, device=self.device)
                 
                 for p_idx in range(self.P):
-                    # 获取当前 persona 下所有词的 log_prob: [N_rows]
-                    # all_word_log_probs: [M, P, R, V]
                     probs_p = all_word_log_probs[m_idx_arr, p_idx, r_idx_arr, w_idx_arr]
-                    
-                    # 乘以频次: [N_rows]
-                    weighted_probs = probs_p * counts_arr
-                    
-                    # 按照 c_idx 聚合求和: [C]
-                    ll_matrix[:, p_idx].index_add_(0, c_idx_arr, weighted_probs)
+                    ll_matrix[:, p_idx].index_add_(0, c_idx_arr, probs_p * counts_arr)
                 
                 ll_matrix = ll_matrix.cpu().numpy()
-                # ---------------------------------------------------------
 
-                for book in tqdm(unique_books, desc="  [E-Step] Gibbs Sampling"):
+                for book in unique_books:
                     char_indices = np.where(char_to_book == book)[0]
-                    if len(char_indices) == 0: continue
-                    
                     for c in char_indices:
                         old_p = self.p_assignments[c]
                         self.book_persona_counts[book][old_p] -= 1
-                        
                         prior = np.log(self.book_persona_counts[book] + self.alpha)
-                        ll = ll_matrix[c, :] # 直接使用预计算的结果
-                        
-                        post_logits = prior + ll
-                        # 减去最大值防止溢出
+                        post_logits = prior + ll_matrix[c, :]
                         post_logits -= np.max(post_logits)
                         post_probs = np.exp(post_logits) / np.sum(np.exp(post_logits))
-                        
                         new_p = np.random.choice(self.P, p=post_probs)
                         self.p_assignments[c] = new_p
                         self.book_persona_counts[book][new_p] += 1
                         
+    def save_checkpoint(self, path, current_iter):
+        checkpoint = {
+            'model_weights': self.model.state_dict(),
+            'p_assignments': self.p_assignments,
+            'alpha': self.alpha,
+            'book_persona_counts': dict(self.book_persona_counts),
+            'current_iter': current_iter,
+            'P': self.P
+        }
+        torch.save(checkpoint, path)
+
     def save_results(self, output_dir):
         os.makedirs(output_dir, exist_ok=True)
         print(f"\n>>> Saving model and results to {output_dir}/")

@@ -17,6 +17,7 @@ def sinkhorn_distance_batch(P, Q, M, eps=0.01, max_iter=100):
     M = M.to(device)
     
     K_kernel = torch.exp(-M / eps)
+    Z = K_kernel * M # 预计算用于距离计算的核
     
     # ---------------------------------------------------------
     # 【硬件适配】：尝试使用 Intel NPU 加速矩阵乘法核
@@ -53,8 +54,6 @@ def sinkhorn_distance_batch(P, Q, M, eps=0.01, max_iter=100):
             u = torch.ones_like(P_batch) / P_batch.shape[-1]
             for _ in range(30): # 简化迭代次数加速搜索
                 if use_npu:
-                    # NPU 路径 (使用 compiled mm_kernel)
-                    # 注意：需要将输入转为 fp16
                     u16, K16, KT16 = u.half(), K_kernel.half(), K_kernel.t().half()
                     v = Q_j / (mm_kernel(u16, K16).float() + 1e-8)
                     v16 = v.half()
@@ -63,7 +62,13 @@ def sinkhorn_distance_batch(P, Q, M, eps=0.01, max_iter=100):
                     v = Q_j / (torch.matmul(u, K_kernel) + 1e-8)
                     u = P_batch / (torch.matmul(v, K_kernel.t()) + 1e-8)
             
-            dist = torch.sum(u * torch.matmul(v * K_kernel, M.t()), dim=-1)
+            # 修复：正确计算批量的 Sinkhorn 距离
+            # dist = sum_i sum_j (u_i * v_j * K_ij * M_ij)
+            if use_npu:
+                dist = torch.sum(u * mm_kernel(v.half(), Z.t().half()).float(), dim=-1)
+            else:
+                dist = torch.sum(u * torch.matmul(v, Z.t()), dim=-1)
+                
             results[i:i+batch_size, j] = dist
             
     return results
