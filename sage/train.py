@@ -12,131 +12,145 @@ import time
 
 import sys
 
+import traceback
+
 def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_nodes, cluster_centers, args, temp_model_meta):
     """
     Sub-process function to handle one specific n_personas across multiple iteration milestones.
     """
-    # 1. 设置独立的标准输出到日志文件
-    checkpoint_dir = os.path.join(args.output_dir, f"P{n_personas}")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    log_file = open(os.path.join(checkpoint_dir, "process.log"), "a", buffering=1)
-    sys.stdout = log_file
-    sys.stderr = log_file
+    try:
+        # 1. 设置绝对路径
+        abs_output_dir = os.path.abspath(args.output_dir)
+        checkpoint_dir = os.path.join(abs_output_dir, f"P{n_personas}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        log_file = open(os.path.join(checkpoint_dir, "process.log"), "a", buffering=1)
+        sys.stdout = log_file
+        sys.stderr = log_file
 
-    device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n>>> [Process P={n_personas}] Started on {device}")
-    
-    # 辅助函数：更新全局仪表盘
-    def update_live_status(current_it, total_it, status_text=""):
+        device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+        print(f"\n>>> [Process P={n_personas}] Started on {device}")
+        
+        # 辅助函数：更新全局仪表盘 (使用绝对路径)
+        def update_live_status(current_it, total_it, status_text=""):
+            try:
+                status_file = os.path.join(abs_output_dir, "live_status.txt")
+                lines = []
+                if os.path.exists(status_file):
+                    with open(status_file, "r") as f: lines = f.readlines()
+                
+                new_line = f"P={n_personas:2d} | Iter: {current_it:3d}/{total_it:3d} | {status_text} | Time: {time.strftime('%H:%M:%S')}\n"
+                
+                found = False
+                for i in range(len(lines)):
+                    if lines[i].startswith(f"P={n_personas:2d}"):
+                        lines[i] = new_line
+                        found = True
+                        break
+                if not found: lines.append(new_line)
+                
+                with open(status_file, "w") as f: f.writelines(sorted(lines))
+            except: pass
+
+        # ... (rest of model init)
+        sorted_iters = sorted(em_iters_list)
+        current_resume_state = None
+        last_iter = 0
+        
+        # Try to find the latest existing checkpoint
+        for it in reversed(sorted_iters):
+            ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_it{it}.pt")
+            if os.path.exists(ckpt_path):
+                print(f"  [P={n_personas}] Found existing checkpoint for iteration {it}. Loading...")
+                current_resume_state = torch.load(ckpt_path, map_location=device)
+                last_iter = it
+                break
+
+        for target_iter in sorted_iters:
+            if target_iter <= last_iter:
+                continue 
+            
+            model_engine = LiteraryPersonaSAGE(
+                n_personas=n_personas, 
+                em_iters=target_iter, 
+                l1_lambda=args.l1_lambda
+            )
+            model_engine.device = device
+            
+            # Sync meta info
+            model_engine.R = temp_model_meta['R']
+            model_engine.r_map = temp_model_meta['r_map']
+            model_engine.word_paths = temp_model_meta['word_paths'].to(device)
+            model_engine.word_signs = temp_model_meta['word_signs'].to(device)
+            model_engine.vocab_clusters = temp_model_meta['vocab_clusters']
+            model_engine.cluster_map = temp_model_meta['cluster_map']
+            
+            # Train
+            model_engine.fit(train_df, num_internal_nodes, resume_state=current_resume_state, checkpoint_dir=checkpoint_dir, status_callback=update_live_status, m_map=temp_model_meta['m_map'], char_map=temp_model_meta['char_map'])
+            
+            # Save checkpoint
+            ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_it{target_iter}.pt")
+            model_engine.save_checkpoint(ckpt_path, target_iter)
+            
+            # Evaluation
+            V_total = len(model_engine.vocab_clusters)
+            char_word_counts_df = train_df.groupby(['c_idx', 'w_idx'])['count'].sum().unstack(fill_value=0)
+            char_word_counts_df = char_word_counts_df.reindex(columns=range(V_total), fill_value=0)
+            char_dist = char_word_counts_df.values / (char_word_counts_df.values.sum(axis=1, keepdims=True) + 1e-10)
+            
+            # 修复：直接使用精准 index 确保标签对齐
+            train_labels = model_engine.p_assignments[char_word_counts_df.index.values]
+            silhouette = calculate_metrics(char_dist, train_labels, cluster_centers, n_personas)
+            perplexity = calculate_perplexity(model_engine.model, test_df, model_engine.word_paths, model_engine.word_signs, device)
+            
+            res = {
+                "n_personas": n_personas,
+                "em_iters": target_iter,
+                "silhouette": silhouette,
+                "perplexity": perplexity,
+                "timestamp": time.time()
+            }
+            
+            with open(os.path.join(checkpoint_dir, f"result_it{target_iter}.json"), 'w') as f:
+                json.dump(res, f)
+                
+            current_resume_state = torch.load(ckpt_path, map_location=device)
+            last_iter = target_iter
+            
+    except Exception as e:
+        # 核心：确保即使失败也能在各自的日志里看到报错栈
+        print(f"\n!!! [Process P={n_personas}] CRASHED:")
+        traceback.print_exc()
+        # 尝试更新仪表盘告知挂了
         try:
-            status_file = os.path.join(args.output_dir, "live_status.txt")
-            # 我们用简单覆盖的方式更新，每行代表一个进程
-            lines = []
-            if os.path.exists(status_file):
-                with open(status_file, "r") as f: lines = f.readlines()
-            
-            new_line = f"P={n_personas:2d} | Iter: {current_it:3d}/{total_it:3d} | {status_text} | Time: {time.strftime('%H:%M:%S')}\n"
-            
-            # 更新或添加行
-            found = False
-            for i in range(len(lines)):
-                if lines[i].startswith(f"P={n_personas:2d}"):
-                    lines[i] = new_line
-                    found = True
-                    break
-            if not found: lines.append(new_line)
-            
-            with open(status_file, "w") as f: f.writelines(sorted(lines))
+            status_file = os.path.join(os.path.abspath(args.output_dir), "live_status.txt")
+            with open(status_file, "a") as f:
+                f.write(f"P={n_personas:2d} | FAILED | Error: {str(e)[:50]}\n")
         except: pass
 
-    results = []
-    # ... (rest of the logic)
-    
-    # Sort em_iters to ensure incremental training
-    sorted_iters = sorted(em_iters_list)
-    
-    current_resume_state = None
-    last_iter = 0
-    
-    # Try to find the latest existing checkpoint
-    for it in reversed(sorted_iters):
-        ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_it{it}.pt")
-        if os.path.exists(ckpt_path):
-            print(f"  [P={n_personas}] Found existing checkpoint for iteration {it}. Loading...")
-            current_resume_state = torch.load(ckpt_path, map_location=device)
-            last_iter = it
-            break
-
-    for target_iter in sorted_iters:
-        if target_iter <= last_iter:
-            # Already calculated, but we need to load it for the next step or for results
-            ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_it{target_iter}.pt")
-            current_resume_state = torch.load(ckpt_path, map_location=device)
-            
-            # Calculate metrics if not already in global results (handled by main process usually)
-            # For simplicity, we re-calculate or just skip if we assume global JSON is the source of truth
-            continue 
-        
-        model_engine = LiteraryPersonaSAGE(
-            n_personas=n_personas, 
-            em_iters=target_iter, 
-            l1_lambda=args.l1_lambda
-        )
-        model_engine.device = device
-        
-        # Sync meta info
-        model_engine.R = temp_model_meta['R']
-        model_engine.r_map = temp_model_meta['r_map']
-        model_engine.word_paths = temp_model_meta['word_paths'].to(device)
-        model_engine.word_signs = temp_model_meta['word_signs'].to(device)
-        model_engine.vocab_clusters = temp_model_meta['vocab_clusters']
-        model_engine.c_map = temp_model_meta['c_map']
-        
-        # Train
-        model_engine.fit(train_df, num_internal_nodes, resume_state=current_resume_state, checkpoint_dir=checkpoint_dir, status_callback=update_live_status)
-        
-        # Save checkpoint
-        ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_it{target_iter}.pt")
-        model_engine.save_checkpoint(ckpt_path, target_iter)
-        
-        # Evaluation
-        V_total = len(model_engine.vocab_clusters)
-        char_word_counts_df = train_df.groupby(['c_idx', 'w_idx'])['count'].sum().unstack(fill_value=0)
-        char_word_counts_df = char_word_counts_df.reindex(columns=range(V_total), fill_value=0)
-        char_dist = char_word_counts_df.values / (char_word_counts_df.values.sum(axis=1, keepdims=True) + 1e-10)
-        
-        silhouette = calculate_metrics(char_dist, model_engine.p_assignments, cluster_centers, n_personas)
-        
-        # Perplexity
-        perplexity = calculate_perplexity(
-            model_engine.model, 
-            test_df, 
-            model_engine.word_paths, 
-            model_engine.word_signs, 
-            device
-        )
-        
-        res = {
-            "n_personas": n_personas,
-            "em_iters": target_iter,
-            "silhouette": silhouette,
-            "perplexity": perplexity,
-            "timestamp": time.time()
-        }
-        
-        # Save local result
-        with open(os.path.join(checkpoint_dir, f"result_it{target_iter}.json"), 'w') as f:
-            json.dump(res, f)
-            
-        current_resume_state = torch.load(ckpt_path, map_location=device)
-        last_iter = target_iter
-
 def run_optimized_grid_search(args):
-    print(">>> Initializing Optimized Grid Search...")
+    # 强制使用绝对路径
+    args.output_dir = os.path.abspath(args.output_dir)
+    args.output_json = os.path.abspath(args.output_json)
+    
+    print(f">>> Initializing Optimized Grid Search...")
+    print(f"    Checkpoints: {args.output_dir}")
+    print(f"    Final JSON:  {args.output_json}")
+    
+    # ... (rest of loading logic)
     # Use a dummy model to load data and build tree once
     temp_model = LiteraryPersonaSAGE(n_personas=args.n_personas_list[0], em_iters=1)
     df, num_internal_nodes = temp_model.load_and_preprocess_data(args.data_file, args.word_csv_file)
     
+    # Pre-mapping
+    authors = sorted(df["author"].unique())
+    m_map = {a: i for i, a in enumerate(authors)}
+    df['m_idx'] = df['author'].map(m_map)
+    
+    char_keys = sorted(df["char_key"].unique())
+    char_map = {ck: i for i, ck in enumerate(char_keys)}
+    df['c_idx'] = df['char_key'].map(char_map)
+
     # Meta info to pass to sub-processes
     temp_model_meta = {
         'R': temp_model.R,
@@ -144,24 +158,19 @@ def run_optimized_grid_search(args):
         'word_paths': temp_model.word_paths.cpu(),
         'word_signs': temp_model.word_signs.cpu(),
         'vocab_clusters': temp_model.vocab_clusters,
-        'c_map': temp_model.c_map
+        'cluster_map': temp_model.cluster_map,
+        'char_map': char_map,
+        'm_map': m_map
     }
 
     df_words = pd.read_csv(args.word_csv_file)
     df_words['vector'] = df_words['vector'].apply(lambda x: np.array([float(v) for v in x.split(',')]))
     cluster_centers = np.vstack(df_words.groupby('cluster_id')['vector'].apply(lambda x: np.mean(np.vstack(x), axis=0)).values)
     
-    # Pre-mapping
-    authors = sorted(df["author"].unique())
-    m_map = {a: i for i, a in enumerate(authors)}
-    df['m_idx'] = df['author'].map(m_map)
     roles = ['agent', 'patient', 'possessive', 'predicative']
     r_map = {r: i for i, r in enumerate(roles)}
     df['r_idx'] = df['role'].map(r_map)
-    df['w_idx'] = df['cluster_id'].map(temp_model.c_map)
-    char_keys = sorted(df["char_key"].unique())
-    c_map = {ck: i for i, ck in enumerate(char_keys)}
-    df['c_idx'] = df['char_key'].map(c_map)
+    df['w_idx'] = df['cluster_id'].map(temp_model.cluster_map)
 
     np.random.seed(42)
     test_chars = np.random.choice(char_keys, size=int(len(char_keys) * 0.2), replace=False)
@@ -187,6 +196,7 @@ def run_optimized_grid_search(args):
 
     # Final Merge
     all_results = []
+    print(f"\n>>> Merging results from {args.output_dir}...")
     for n_personas in args.n_personas_list:
         checkpoint_dir = os.path.join(args.output_dir, f"P{n_personas}")
         for it in args.em_iters_list:
@@ -194,6 +204,13 @@ def run_optimized_grid_search(args):
             if os.path.exists(res_path):
                 with open(res_path, 'r') as f:
                     all_results.append(json.load(f))
+            else:
+                print(f"    [Missing] No result file at {res_path}")
+    
+    if not all_results:
+        print("!!! WARNING: No results found to merge. all_results is empty.")
+    else:
+        print(f">>> Successfully merged {len(all_results)} result(s).")
     
     with open(args.output_json, 'w') as f:
         json.dump(all_results, f, indent=4)

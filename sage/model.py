@@ -250,9 +250,9 @@ class LiteraryPersonaSAGE:
         clusters = list(cluster_vectors.keys())
         V = len(clusters)
         self.vocab_clusters = sorted(clusters)
-        self.c_map = {c: i for i, c in enumerate(self.vocab_clusters)}
+        self.cluster_map = {c: i for i, c in enumerate(self.vocab_clusters)}
         
-        current_level_nodes = {self.c_map[k]: v for k, v in cluster_vectors.items()}
+        current_level_nodes = {self.cluster_map[k]: v for k, v in cluster_vectors.items()}
         parent_map = {}
         sign_map = {}
         next_node_id = V
@@ -356,27 +356,35 @@ class LiteraryPersonaSAGE:
         
         return df, num_internal_nodes
 
-    def fit(self, df, num_internal_nodes, resume_state=None, checkpoint_dir=None, status_callback=None):
-        # ... (metadata setup)
-        authors = sorted(df["author"].unique())
-        self.m_map = {author: i for i, author in enumerate(authors)}
-        self.M = len(authors)
+    def fit(self, df, num_internal_nodes, resume_state=None, checkpoint_dir=None, status_callback=None, m_map=None, char_map=None):
+        # Metadata setup
+        if m_map is not None:
+            self.m_map = m_map
+        else:
+            authors = sorted(df["author"].unique())
+            self.m_map = {author: i for i, author in enumerate(authors)}
+        self.M = len(self.m_map)
 
         char_keys = sorted(df["char_key"].unique())
-        c_map = {ck: i for i, ck in enumerate(char_keys)}
-        self.C = len(char_keys)
+        if char_map is not None:
+            local_char_map = char_map
+        else:
+            local_char_map = {ck: i for i, ck in enumerate(char_keys)}
         
         # 将数据转为方便处理的张量结构
         df['m_idx'] = df['author'].map(self.m_map)
-        df['c_idx'] = df['char_key'].map(c_map)
+        df['c_idx'] = df['char_key'].map(local_char_map)
         df['r_idx'] = df['role'].map(self.r_map)
-        df['w_idx'] = df['cluster_id'].map(self.c_map)
+        df['w_idx'] = df['cluster_id'].map(self.cluster_map)
         
-        temp_info = df.groupby("char_key")[["author", "book", "m_idx"]].first().reindex(char_keys).reset_index()
+        # 统计当前输入中涉及的角色
+        present_char_indices = sorted(df['c_idx'].unique())
+        self.C = max(present_char_indices) + 1 if present_char_indices else 0
+        
+        temp_info = df.groupby("c_idx")[["author", "book", "m_idx"]].first().reindex(range(self.C)).fillna(method='ffill').fillna(method='bfill')
         self.char_info_df = temp_info
-        char_to_m = temp_info['m_idx'].values
         char_to_book = temp_info['book'].values
-        unique_books = temp_info['book'].unique()
+        unique_books = df['book'].unique()
 
         self.model = HierarchicalSAGE(self.M, self.P, self.R, num_internal_nodes).to(self.device)
 
@@ -396,18 +404,23 @@ class LiteraryPersonaSAGE:
                 self.book_persona_counts[char_to_book[c_idx]][self.p_assignments[c_idx]] += 1
             start_iter = 0
 
+        # ---------------------------------------------------------
+        # 【极致优化】：预计算 M-Step 静态索引
+        # ---------------------------------------------------------
+        print(">>> Pre-calculating static indices for M-Step optimization...")
+        # 1. 预先按 (c_idx, m_idx, r_idx, w_idx) 聚合，这是静态的
+        m_step_static = df.groupby(['c_idx', 'm_idx', 'r_idx', 'w_idx'])['count'].sum().reset_index()
+        
+        # 2. 转为张量并移至设备
+        ms_c_idx = torch.tensor(m_step_static['c_idx'].values, device=self.device)
+        ms_m_idx = torch.tensor(m_step_static['m_idx'].values, device=self.device)
+        ms_r_idx = torch.tensor(m_step_static['r_idx'].values, device=self.device)
+        ms_w_idx = torch.tensor(m_step_static['w_idx'].values, device=self.device)
+        ms_count = torch.tensor(m_step_static['count'].values, dtype=torch.float32, device=self.device)
+        total_tokens = ms_count.sum().item()
+
         print(f"Authors (M): {self.M}, Roles (R): {self.R}, Chars (C): {self.C}")
 
-        # ---------------------------------------------------------
-        # 【硬件适配】：暂时禁用 NPU 优化以确保稳定性
-        # ---------------------------------------------------------
-        # try:
-        #     import intel_npu_acceleration_library
-        #     print(">>> [Hardware] Intel NPU detected. Compiling model for NPU...")
-        #     self.model = intel_npu_acceleration_library.compile(self.model)
-        # except Exception as e:
-        #     print(f">>> [Hardware] Intel NPU optimization failed: {e}")
-        
         regularized_params = [self.model.eta_meta, self.model.eta_pers]
         unregularized_params = [self.model.eta_bg]
         
@@ -435,26 +448,22 @@ class LiteraryPersonaSAGE:
             if (it + 1) % 5 == 0:
                 self.alpha = slice_sample_alpha(self.alpha, self.book_persona_counts, len(unique_books), self.P)
 
-            # --- M-STEP ---
+            # --- M-STEP (Optimized) ---
             self.model.train()
-            p_map_df = pd.Series(self.p_assignments, index=np.arange(self.C))
-            df['p_idx'] = df['c_idx'].map(p_map_df)
             
-            agg_df = df.groupby(['m_idx', 'p_idx', 'r_idx', 'w_idx'])['count'].sum().reset_index()
-            
-            m_idx_t = torch.tensor(agg_df['m_idx'].values, device=self.device)
-            p_idx_t = torch.tensor(agg_df['p_idx'].values, device=self.device)
-            r_idx_t = torch.tensor(agg_df['r_idx'].values, device=self.device)
-            w_idx_t = torch.tensor(agg_df['w_idx'].values, device=self.device)
-            counts_t = torch.tensor(agg_df['count'].values, dtype=torch.float32, device=self.device)
-            total_tokens = counts_t.sum().item()
+            # 这里的 p_assignments 张量化
+            p_assignments_t = torch.from_numpy(self.p_assignments).to(self.device)
+            # 获取当前所有静态行对应的 p_idx
+            ms_p_idx = p_assignments_t[ms_c_idx]
             
             def closure():
                 optimizer.zero_grad()
-                node_paths = self.word_paths[w_idx_t]
-                node_signs = self.word_signs[w_idx_t]
-                word_log_probs = self.model(m_idx_t, p_idx_t, r_idx_t, node_paths, node_signs)
-                loss = -torch.sum(word_log_probs * counts_t)/total_tokens
+                node_paths = self.word_paths[ms_w_idx]
+                node_signs = self.word_signs[ms_w_idx]
+                # 直接在 ms_idx 上计算概率
+                word_log_probs = self.model(ms_m_idx, ms_p_idx, ms_r_idx, node_paths, node_signs)
+                # 加权求和得到负对数似然
+                loss = -torch.sum(word_log_probs * ms_count) / total_tokens
                 loss.backward()
                 return loss
             
@@ -523,6 +532,9 @@ class LiteraryPersonaSAGE:
                 r_idx_arr = torch.tensor(df['r_idx'].values, device=self.device)
                 w_idx_arr = torch.tensor(df['w_idx'].values, device=self.device)
                 counts_arr = torch.tensor(df['count'].values, dtype=torch.float32, device=self.device)
+                
+                # 初始化 Likelihood Matrix
+                ll_matrix = torch.zeros((self.C, self.P), device=self.device)
                 
                 for p_idx in range(self.P):
                     probs_p = all_word_log_probs[m_idx_arr, p_idx, r_idx_arr, w_idx_arr]
