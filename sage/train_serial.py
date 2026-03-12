@@ -3,28 +3,29 @@ import argparse
 import pandas as pd
 import numpy as np
 import torch
-import torch.multiprocessing as mp
 from tqdm import tqdm
 from model import LiteraryPersonaSAGE
 from metrics import calculate_metrics, calculate_perplexity
 import json
 import time
-
 import sys
-
 import traceback
 
 def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_nodes, cluster_centers, args, temp_model_meta):
     """
-    Sub-process function to handle one specific n_personas across multiple iteration milestones.
+    Function to handle one specific n_personas across multiple iteration milestones sequentially.
     """
+    # 记录原始的 stdout/stderr 以便后续恢复
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
     try:
-        # 1. 设置绝对路径
         abs_output_dir = os.path.abspath(args.output_dir)
+        
         class Tee(object):
             def __init__(self, filename, mode="a"):
                 self.file = open(filename, mode, buffering=1)
-                self.stdout = sys.__stdout__
+                self.stdout = original_stdout
             def write(self, message):
                 self.file.write(message)
                 self.stdout.write(message)
@@ -40,9 +41,10 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
         sys.stderr = Tee(log_path)
 
         device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
-        print(f"\n>>> [Process P={n_personas}] Started on {device}")
+        print(f"\n\n{'='*60}")
+        print(f">>> [Serial Mode] Starting P={n_personas} on {device}")
+        print(f"{'='*60}")
         
-        # 辅助函数：更新全局仪表盘 (使用绝对路径)
         def update_live_status(current_it, total_it, status_text=""):
             try:
                 status_file = os.path.join(abs_output_dir, "live_status.txt")
@@ -63,7 +65,6 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
                 with open(status_file, "w") as f: f.writelines(sorted(lines))
             except: pass
 
-        # ... (rest of model init)
         sorted_iters = sorted(em_iters_list)
         current_resume_state = None
         last_iter = 0
@@ -81,6 +82,7 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
             if target_iter <= last_iter:
                 continue 
             
+            print(f"\n--- Training P={n_personas} until iteration {target_iter} ---")
             model_engine = LiteraryPersonaSAGE(
                 n_personas=n_personas, 
                 em_iters=target_iter, 
@@ -109,7 +111,6 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
             char_word_counts_df = char_word_counts_df.reindex(columns=range(V_total), fill_value=0)
             char_dist = char_word_counts_df.values / (char_word_counts_df.values.sum(axis=1, keepdims=True) + 1e-10)
             
-            # 修复：直接使用精准 index 确保标签对齐
             train_labels = model_engine.p_assignments[char_word_counts_df.index.values]
             silhouette = calculate_metrics(char_dist, train_labels, cluster_centers, n_personas)
             perplexity = calculate_perplexity(model_engine.model, test_df, model_engine.word_paths, model_engine.word_signs, device)
@@ -129,31 +130,22 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
             last_iter = target_iter
             
     except Exception as e:
-        # 核心：确保即使失败也能在各自的日志里看到报错栈
-        print(f"\n!!! [Process P={n_personas}] CRASHED:")
+        print(f"\n!!! [P={n_personas}] ERROR:")
         traceback.print_exc()
-        # 尝试更新仪表盘告知挂了
-        try:
-            status_file = os.path.join(os.path.abspath(args.output_dir), "live_status.txt")
-            with open(status_file, "a") as f:
-                f.write(f"P={n_personas:2d} | FAILED | Error: {str(e)[:50]}\n")
-        except: pass
+    finally:
+        # 恢复 stdout/stderr
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
 
-def run_optimized_grid_search(args):
-    # 强制使用绝对路径
+def run_serial_grid_search(args):
     args.output_dir = os.path.abspath(args.output_dir)
     args.output_json = os.path.abspath(args.output_json)
     
-    print(f">>> Initializing Optimized Grid Search...")
-    print(f"    Checkpoints: {args.output_dir}")
-    print(f"    Final JSON:  {args.output_json}")
+    print(f">>> Initializing Serial Grid Search...")
     
-    # ... (rest of loading logic)
-    # Use a dummy model to load data and build tree once
     temp_model = LiteraryPersonaSAGE(n_personas=args.n_personas_list[0], em_iters=1)
     df, num_internal_nodes = temp_model.load_and_preprocess_data(args.data_file, args.word_csv_file)
     
-    # Pre-mapping
     authors = sorted(df["author"].unique())
     m_map = {a: i for i, a in enumerate(authors)}
     df['m_idx'] = df['author'].map(m_map)
@@ -162,7 +154,6 @@ def run_optimized_grid_search(args):
     char_map = {ck: i for i, ck in enumerate(char_keys)}
     df['c_idx'] = df['char_key'].map(char_map)
 
-    # Meta info to pass to sub-processes
     temp_model_meta = {
         'R': temp_model.R,
         'r_map': temp_model.r_map,
@@ -188,26 +179,16 @@ def run_optimized_grid_search(args):
     train_df = df[~df['char_key'].isin(test_chars)].copy()
     test_df = df[df['char_key'].isin(test_chars)].copy()
 
-    # Multiprocessing
-    mp.set_start_method('spawn', force=True)
-    processes = []
-    
+    # Sequential execution
     for n_personas in args.n_personas_list:
-        p = mp.Process(target=train_and_eval, args=(
+        train_and_eval(
             n_personas, args.em_iters_list, train_df, test_df, 
             num_internal_nodes, cluster_centers, args, temp_model_meta
-        ))
-        p.start()
-        processes.append(p)
-        # Small delay to avoid concurrent disk/IO heavy initialization if needed
-        time.sleep(2)
-
-    for p in processes:
-        p.join()
+        )
 
     # Final Merge
     all_results = []
-    print(f"\n>>> Merging results from {args.output_dir}...")
+    print(f"\n>>> Merging results...")
     for n_personas in args.n_personas_list:
         checkpoint_dir = os.path.join(args.output_dir, f"P{n_personas}")
         for it in args.em_iters_list:
@@ -215,13 +196,6 @@ def run_optimized_grid_search(args):
             if os.path.exists(res_path):
                 with open(res_path, 'r') as f:
                     all_results.append(json.load(f))
-            else:
-                print(f"    [Missing] No result file at {res_path}")
-    
-    if not all_results:
-        print("!!! WARNING: No results found to merge. all_results is empty.")
-    else:
-        print(f">>> Successfully merged {len(all_results)} result(s).")
     
     with open(args.output_json, 'w') as f:
         json.dump(all_results, f, indent=4)
@@ -238,4 +212,4 @@ if __name__ == "__main__":
     parser.add_argument('--l1_lambda', type=float, default=1e-6)
     
     args = parser.parse_args()
-    run_optimized_grid_search(args)
+    run_serial_grid_search(args)

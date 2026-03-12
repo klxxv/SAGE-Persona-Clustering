@@ -20,8 +20,8 @@ while($true) {
     
     # 3. Results JSON
     Write-Host "`n--- Metric Results ---" -ForegroundColor Green
-    if (Test-Path data/results/grid_search_results_full.json) {
-        $results = Get-Content data/results/grid_search_results_full.json | ConvertFrom-Json
+    if (Test-Path data/results/grid_search_results_iters.json) {
+        $results = Get-Content data/results/grid_search_results_iters.json | ConvertFrom-Json
         $results | Format-Table n_personas, em_iters, silhouette, perplexity
     } else {
         Write-Host "Results JSON not generated yet."
