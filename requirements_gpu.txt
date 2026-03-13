@@ -1,0 +1,19 @@
+# Core GPU & NLP Requirements
+sentence-transformers
+transformers
+spacy
+nltk
+jieba
+numpy
+pandas
+scipy
+scikit-learn
+cupy-cuda12x
+matplotlib
+seaborn
+pynvml
+tqdm
+openpyxl
+gensim
+umap-learn
+numba
