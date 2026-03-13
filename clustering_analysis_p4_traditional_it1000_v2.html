@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>上海小说人物聚类深度分析 (Traditional SAGE IT1000)</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; background-color: #0f1117; font-family: 'Noto Sans SC', sans-serif; color: #e4e6ed; }
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f1117; }
+        ::-webkit-scrollbar-thumb { background: #2a2e3a; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState } = React;
+        const COLORS = {
+            bg: "#0f1117", card: "#1a1d27", border: "#2a2e3a",
+            text: "#e4e6ed", textMuted: "#8b90a0", accent: "#6c8aff",
+            green: "#4ade80", amber: "#fbbf24", rose: "#fb7185"
+        };
+        const PERSONA_COLORS = ["#6c8aff", "#4ade80", "#fbbf24", "#fb7185"];
+        const personaData = [{"id": 0, "name": "核心叙述者与主角", "nameEn": "Past-Tense Narrator", "count": 2277, "pct": "46.9%", "male": 48.7, "female": 37.9, "neutral": 13.4, "avgCount": 86, "medCount": 20, "desc": "传统 SAGE 模型通过显著性权重识别出的类别。关键词: box, end, hurt, C965, blessing, breath, better, pass, telling, worries, consumed, broke, coming, removed, interest", "topChars": ["Character_0 (The_Valley_of_Amazement)", "Character_0 (Peach_Blossom_Pavillion)", "Character_0 (The_Distant_Land_of_My_Father)", "Character_0 (All_the_Flowers_in_Shanghai)", "Franz (The_Far_Side_of_the_Sky_Adler_Family_1)"], "quality": "good", "qualityNote": "传统模型在此类展现了极高的类内一致性。"}, {"id": 1, "name": "现在时交互型主角", "nameEn": "Present-Tense Interactive", "count": 584, "pct": "12.0%", "male": 51.7, "female": 40.4, "neutral": 7.9, "avgCount": 67, "medCount": 19, "desc": "传统 SAGE 模型通过显著性权重识别出的类别。关键词: C969, mouths, end, taken, C954, asks, finished, C957, appointed, set, removed, hurt, guided, torn, involved", "topChars": ["Character_0 (Shanghai_Immortal)", "Juliette (These_Violent_Delights)", "Yuliang (The_Painter_From_Shanghai)", "Character_0 (Blue_Hunger_Viola_Di_Grado)", "Mr Lee (Shanghai_Immortal)"], "quality": "good", "qualityNote": "传统模型在此类展现了极高的类内一致性。"}, {"id": 2, "name": "都市生活重要配角", "nameEn": "Urban Social Supporting", "count": 1241, "pct": "25.5%", "male": 43.8, "female": 30.3, "neutral": 25.9, "avgCount": 41, "medCount": 17, "desc": "传统 SAGE 模型通过显著性权重识别出的类别。关键词: end, removed, C994, hits, hate, C945, coming, coloring, C957, knocked, C934, close, drove, entered, paid", "topChars": ["Character_0 (Dreams_of_Joy)", "Phoebe (Five_Star_Billionaire)", "Character_0 (Shanghailanders)", "Character_0 (Dont_Cry_Tai_Lake)", "Lindsey (Rabbit_Moon)"], "quality": "good", "qualityNote": "传统模型在此类展现了极高的类内一致性。"}, {"id": 3, "name": "背景关系型角色", "nameEn": "Relational Background", "count": 758, "pct": "15.6%", "male": 21.8, "female": 19.0, "neutral": 59.2, "avgCount": 74, "medCount": 14, "desc": "传统 SAGE 模型通过显著性权重识别出的类别。关键词: tutor, end, crying, asks, hurt, involved, C965, express, breathing, pass, C984, interest, needs, kisses, entered", "topChars": ["Character_0 (The_Shanghai_Moon)", "Character_0 (Shanghai_Girls)", "Character_0 (Becoming_Madame_Mao)", "Knox (The_Risk_Agent)", "Character_0 (A_Loyal_Character_Dancer)"], "quality": "medium", "qualityNote": "传统模型在此类展现了极高的类内一致性。"}];
+
+        function ClusteringAnalysis() {
+            const [tab, setTab] = useState("overview");
+            return (
+                <div style={{ background: COLORS.bg, minHeight: "100vh", padding: "32px 24px" }}>
+                    <div style={{ maxWidth: 900, margin: "0 auto" }}>
+                        <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>上海小说人物聚类报告 (Traditional SAGE)</h1>
+                        <p style={{ color: COLORS.textMuted, marginBottom: 32 }}>IT1000 · EM 算法 · 显著性权重分析 · 轮廓系数 0.1408</p>
+                        
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 28 }}>
+                            {[
+                                { label: "总角色数", value: "4,860" },
+                                { label: "聚类数", value: "4" },
+                                { label: "轮廓系数", value: "0.1408" },
+                                { label: "迭代次数", value: "1,000" }
+                            ].map((s, i) => (
+                                <div key={i} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderRadius: 10, padding: 16, textAlign: "center" }}>
+                                    <div style={{ color: COLORS.text, fontSize: 22, fontWeight: 700 }}>{s.value}</div>
+                                    <div style={{ color: COLORS.textMuted, fontSize: 12 }}>{s.label}</div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
+                            {["overview", "viz"].map(t => (
+                                <button key={t} onClick={() => setTab(t)} style={{
+                                    padding: "8px 20px", borderRadius: 8, border: "none", cursor: "pointer",
+                                    background: tab === t ? COLORS.accent : COLORS.card,
+                                    color: "#fff", fontWeight: 600
+                                }}>{t === "overview" ? "聚类总览" : "可视化"}</button>
+                            ))}
+                        </div>
+
+                        {tab === "overview" && (
+                            <div style={{ display: "grid", gap: 16 }}>
+                                {personaData.map(p => (
+                                    <div key={p.id} style={{ background: COLORS.card, border: "1px solid " + COLORS.border, borderLeft: "4px solid " + PERSONA_COLORS[p.id], borderRadius: 12, padding: 20 }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+                                            <div style={{ fontSize: 18, fontWeight: 700 }}>{p.name} <small style={{ color: COLORS.textMuted, fontWeight: 400 }}>{p.nameEn}</small></div>
+                                            <div style={{ color: COLORS.accent, fontWeight: 700 }}>{p.pct}</div>
+                                        </div>
+                                        <p style={{ color: COLORS.textMuted, fontSize: 14, marginBottom: 12 }}>{p.desc}</p>
+                                        <div style={{ fontSize: 12, color: COLORS.textMuted }}><strong>代表人物:</strong> {p.topChars.join(", ")}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {tab === "viz" && (
+                            <div style={{ textAlign: "center" }}>
+                                <img src="data/results/persona_viz_p4_traditional_it1000.png" style={{ maxWidth: "100%", borderRadius: 12, border: "1px solid " + COLORS.border, marginBottom: 20 }} />
+                                <img src="data/results/p4_distribution_traditional_it1000.png" style={{ maxWidth: "100%", borderRadius: 12, border: "1px solid " + COLORS.border }} />
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+        ReactDOM.createRoot(document.getElementById('root')).render(<ClusteringAnalysis />);
+    </script>
+</body>
+</html>

@@ -1,0 +1,142 @@
+[
+    {
+        "n_personas": 4,
+        "em_iters": 200,
+        "silhouette": 0.20434652105267667,
+        "perplexity": 289.1071921910342,
+        "timestamp": 1773313383.220362
+    },
+    {
+        "n_personas": 4,
+        "em_iters": 400,
+        "silhouette": 0.20482024086489253,
+        "perplexity": 284.1524724243951,
+        "timestamp": 1773313674.6617851
+    },
+    {
+        "n_personas": 4,
+        "em_iters": 600,
+        "silhouette": 0.20714090667768645,
+        "perplexity": 280.7994983395121,
+        "timestamp": 1773313969.3938048
+    },
+    {
+        "n_personas": 4,
+        "em_iters": 800,
+        "silhouette": 0.21345770652158386,
+        "perplexity": 278.3270457843276,
+        "timestamp": 1773314233.643177
+    },
+    {
+        "n_personas": 4,
+        "em_iters": 1000,
+        "silhouette": 0.2086866165046035,
+        "perplexity": 276.4206800748184,
+        "timestamp": 1773314515.8589776
+    },
+    {
+        "n_personas": 8,
+        "em_iters": 200,
+        "silhouette": 0.11948754339318154,
+        "perplexity": 288.02474717132867,
+        "timestamp": 1773315146.6343195
+    },
+    {
+        "n_personas": 8,
+        "em_iters": 400,
+        "silhouette": 0.11495389919227136,
+        "perplexity": 282.91046850740827,
+        "timestamp": 1773315424.980962
+    },
+    {
+        "n_personas": 8,
+        "em_iters": 600,
+        "silhouette": 0.1105397120458975,
+        "perplexity": 279.44745363082717,
+        "timestamp": 1773315708.7708995
+    },
+    {
+        "n_personas": 8,
+        "em_iters": 800,
+        "silhouette": 0.09953978489535502,
+        "perplexity": 276.89273599040405,
+        "timestamp": 1773315991.5340905
+    },
+    {
+        "n_personas": 8,
+        "em_iters": 1000,
+        "silhouette": 0.07414830620717791,
+        "perplexity": 274.91292879797413,
+        "timestamp": 1773316293.5502574
+    },
+    {
+        "n_personas": 12,
+        "em_iters": 200,
+        "silhouette": 0.09375106581675277,
+        "perplexity": 284.49112761157147,
+        "timestamp": 1773316954.7427852
+    },
+    {
+        "n_personas": 12,
+        "em_iters": 400,
+        "silhouette": 0.08554588645540431,
+        "perplexity": 279.42843889780653,
+        "timestamp": 1773317260.1319184
+    },
+    {
+        "n_personas": 12,
+        "em_iters": 600,
+        "silhouette": 0.08658532854620957,
+        "perplexity": 275.88714826130627,
+        "timestamp": 1773317553.581957
+    },
+    {
+        "n_personas": 12,
+        "em_iters": 800,
+        "silhouette": 0.09476139127223272,
+        "perplexity": 273.24270085795683,
+        "timestamp": 1773317844.082688
+    },
+    {
+        "n_personas": 12,
+        "em_iters": 1000,
+        "silhouette": 0.09005086841930895,
+        "perplexity": 271.1742640435968,
+        "timestamp": 1773318128.1091008
+    },
+    {
+        "n_personas": 16,
+        "em_iters": 200,
+        "silhouette": 0.04802723827198558,
+        "perplexity": 287.6356610137071,
+        "timestamp": 1773318831.5684273
+    },
+    {
+        "n_personas": 16,
+        "em_iters": 400,
+        "silhouette": 0.059757835656911576,
+        "perplexity": 282.58138525728015,
+        "timestamp": 1773319142.4160388
+    },
+    {
+        "n_personas": 16,
+        "em_iters": 600,
+        "silhouette": 0.0688673010890735,
+        "perplexity": 279.0923192621015,
+        "timestamp": 1773319459.249491
+    },
+    {
+        "n_personas": 16,
+        "em_iters": 800,
+        "silhouette": 0.05129369878784201,
+        "perplexity": 276.48757940469216,
+        "timestamp": 1773319779.514345
+    },
+    {
+        "n_personas": 16,
+        "em_iters": 1000,
+        "silhouette": 0.04902694467663066,
+        "perplexity": 274.4353778805759,
+        "timestamp": 1773320100.4836535
+    }
+]

@@ -1,0 +1,66 @@
+[
+    {
+        "id": 0,
+        "count": 2277,
+        "male": 48.7,
+        "female": 37.9,
+        "neutral": 13.4,
+        "top_chars": [
+            "Character_0 (The_Valley_of_Amazement)",
+            "Character_0 (Peach_Blossom_Pavillion)",
+            "Character_0 (The_Distant_Land_of_My_Father)",
+            "Character_0 (All_the_Flowers_in_Shanghai)",
+            "Franz (The_Far_Side_of_the_Sky_Adler_Family_1)"
+        ],
+        "avg_count": 86,
+        "med_count": 20
+    },
+    {
+        "id": 1,
+        "count": 584,
+        "male": 51.7,
+        "female": 40.4,
+        "neutral": 7.9,
+        "top_chars": [
+            "Character_0 (Shanghai_Immortal)",
+            "Juliette (These_Violent_Delights)",
+            "Yuliang (The_Painter_From_Shanghai)",
+            "Character_0 (Blue_Hunger_Viola_Di_Grado)",
+            "Mr Lee (Shanghai_Immortal)"
+        ],
+        "avg_count": 67,
+        "med_count": 19
+    },
+    {
+        "id": 2,
+        "count": 1241,
+        "male": 43.8,
+        "female": 30.3,
+        "neutral": 25.9,
+        "top_chars": [
+            "Character_0 (Dreams_of_Joy)",
+            "Phoebe (Five_Star_Billionaire)",
+            "Character_0 (Shanghailanders)",
+            "Character_0 (Dont_Cry_Tai_Lake)",
+            "Lindsey (Rabbit_Moon)"
+        ],
+        "avg_count": 41,
+        "med_count": 17
+    },
+    {
+        "id": 3,
+        "count": 758,
+        "male": 21.8,
+        "female": 19.0,
+        "neutral": 59.2,
+        "top_chars": [
+            "Character_0 (The_Shanghai_Moon)",
+            "Character_0 (Shanghai_Girls)",
+            "Character_0 (Becoming_Madame_Mao)",
+            "Knox (The_Risk_Agent)",
+            "Character_0 (A_Loyal_Character_Dancer)"
+        ],
+        "avg_count": 74,
+        "med_count": 14
+    }
+]
