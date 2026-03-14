@@ -10,7 +10,7 @@ def generate_final_report():
     with open('data/results/p4_summary.json', 'r') as f:
         summary = json.load(f)
     # USE THE NEW DISTINCTIVE KEYWORDS
-    keywords = pd.read_csv('data/results/p4_traditional_distinctive_keywords.csv')
+    keywords = pd.read_csv('data/results/p4_traditional_distinctive_keywords_fixed.csv')
     
     # 2. Export to Excel (.xlsx)
     print(">>> Exporting to Excel (p4_traditional_distinctive_it1000.xlsx)...")
