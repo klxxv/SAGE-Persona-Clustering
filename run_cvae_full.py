@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
-from model import AdvancedLiterarySAGE
-from metrics import calculate_silhouette, calculate_latent_silhouette, calculate_flat_perplexity
+from sage.model import AdvancedLiterarySAGE
+from sage.metrics import calculate_silhouette, calculate_latent_silhouette, calculate_flat_perplexity
 
 def check_cuda_environment():
     print("="*50)

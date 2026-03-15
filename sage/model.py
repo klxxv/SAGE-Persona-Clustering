@@ -167,7 +167,9 @@ class AdvancedLiterarySAGE:
         
         return df
 
-    def fit(self, df):
+    def fit(self, df, batch_size=8192, checkpoint_dir='data/results/checkpoints'):
+        import os
+        os.makedirs(checkpoint_dir, exist_ok=True)
         # 1. 基础索引映射
         authors = sorted(df["author"].unique())
         self.m_map = {a: i for i, a in enumerate(authors)}
@@ -193,41 +195,78 @@ class AdvancedLiterarySAGE:
         
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
         
-        # 准备数据批次
-        batch_m = torch.tensor(df['m_idx'].values, device=self.device)
-        batch_c = torch.tensor(df['c_idx'].values, device=self.device)
-        batch_r = torch.tensor(df['r_idx'].values, device=self.device)
-        batch_w = torch.tensor(df['w_idx'].values, device=self.device)
-        batch_count = torch.tensor(df['count'].values, dtype=torch.float32, device=self.device)
+        # 准备数据数组
+        all_m = torch.tensor(df['m_idx'].values, device=self.device)
+        all_c = torch.tensor(df['c_idx'].values, device=self.device)
+        all_r = torch.tensor(df['r_idx'].values, device=self.device)
+        all_w = torch.tensor(df['w_idx'].values, device=self.device)
+        all_count = torch.tensor(df['count'].values, dtype=torch.float32, device=self.device)
 
-        print(f">>> Training {self.mode}...")
+        n_samples = len(df)
+        print(f">>> Training {self.mode} with {n_samples} samples (batch_size={batch_size})...")
         pbar = tqdm(range(self.iters))
+        
+        # 设定检查点保存频率
+        save_interval = max(1, self.iters // 10)
+        
         for it in pbar:
             self.model.train()
-            optimizer.zero_grad()
+            
+            # Shuffle data indices for epoch
+            indices = torch.randperm(n_samples, device=self.device)
+            
+            total_recon_loss = 0.0
+            total_kl_loss = 0.0
+            total_l1_loss = 0.0
+            total_count = 0.0
             
             temp = max(0.5, 1.0 * np.exp(-0.01 * it))
             
-            # Forward
-            log_probs, persona_logits, z_persona = self.model(char_feats[batch_c], batch_m, batch_r, temp=temp)
+            for start_idx in range(0, n_samples, batch_size):
+                end_idx = min(start_idx + batch_size, n_samples)
+                batch_idx = indices[start_idx:end_idx]
+                
+                batch_m = all_m[batch_idx]
+                batch_c = all_c[batch_idx]
+                batch_r = all_r[batch_idx]
+                batch_w = all_w[batch_idx]
+                batch_count = all_count[batch_idx]
+                
+                optimizer.zero_grad()
+                
+                # Forward
+                log_probs, persona_logits, z_persona = self.model(char_feats[batch_c], batch_m, batch_r, temp=temp)
+                
+                # Reconstruction Loss: NLL
+                recon_loss = -torch.sum(log_probs[torch.arange(len(batch_w)), batch_w] * batch_count) / batch_count.sum()
+                
+                # KL Loss
+                p_soft = F.softmax(persona_logits, dim=-1)
+                kl_loss = torch.sum(p_soft * (torch.log(p_soft + 1e-10) - torch.log(torch.tensor(1.0/self.P))), dim=-1).mean()
+                
+                # L1 Loss (Disentanglement)
+                l1_loss = torch.sum(torch.abs(self.model.decoder.eta_author)) + \
+                          torch.sum(torch.abs(self.model.decoder.eta_persona))
+                
+                loss = recon_loss + 0.1 * kl_loss + self.l1_lambda * l1_loss
+                loss.backward()
+                optimizer.step()
+                
+                batch_sum_count = batch_count.sum().item()
+                total_recon_loss += recon_loss.item() * batch_sum_count
+                total_kl_loss += kl_loss.item() * batch_sum_count
+                total_l1_loss += l1_loss.item() * batch_sum_count
+                total_count += batch_sum_count
+
+            avg_recon = total_recon_loss / total_count if total_count > 0 else 0
+            avg_kl = total_kl_loss / total_count if total_count > 0 else 0
+            avg_l1 = total_l1_loss / total_count if total_count > 0 else 0
             
-            # Reconstruction Loss: NLL
-            # 获取 batch 中每个真实词的 log_prob
-            recon_loss = -torch.sum(log_probs[torch.arange(len(batch_w)), batch_w] * batch_count) / batch_count.sum()
+            pbar.set_postfix({"Recon": f"{avg_recon:.4f}", "L1": f"{avg_l1:.4f}"})
             
-            # KL Loss
-            p_soft = F.softmax(persona_logits, dim=-1)
-            kl_loss = torch.sum(p_soft * (torch.log(p_soft + 1e-10) - torch.log(torch.tensor(1.0/self.P))), dim=-1).mean()
-            
-            # L1 Loss (Disentanglement)
-            l1_loss = torch.sum(torch.abs(self.model.decoder.eta_author)) + \
-                      torch.sum(torch.abs(self.model.decoder.eta_persona))
-            
-            loss = recon_loss + 0.1 * kl_loss + self.l1_lambda * l1_loss
-            loss.backward()
-            optimizer.step()
-            
-            pbar.set_postfix({"Recon": f"{recon_loss.item():.4f}", "L1": f"{l1_loss.item():.4f}"})
+            if (it + 1) % save_interval == 0 or (it + 1) == self.iters:
+                ckpt_path = os.path.join(checkpoint_dir, f'cvae_model_iter_{it+1}.pt')
+                torch.save(self.model.state_dict(), ckpt_path)
 
         # 分配人格
         self.model.eval()
