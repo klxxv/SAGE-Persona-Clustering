@@ -95,14 +95,53 @@ def diagnostic_role_variance():
         </tr>"""
 
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>SAGE 异常分析报告</title><style>
-        body {{ font-family: sans-serif; background: #f4f7f6; padding: 40px; }}
-        .container {{ max-width: 1100px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; }}
-        table {{ width: 100%; border-collapse: collapse; }} th, td {{ padding: 12px; border-bottom: 1px solid #eee; }}
-        th {{ background: #6c8aff; color: white; }} .highlight {{ color: red; font-weight: bold; }} .good {{ color: green; }}
-    </style></head><body><div class="container"><h1>SAGE 依存维度异常诊断</h1><table><thead><tr>
-        <th>Role</th><th>总词频</th><th>Unique词数</th><th>Avg词数/角色</th><th>多样性 (Diversity)</th>
-        <th>敏感度 (Sensitivity)</th><th>分配熵 (Entropy)</th><th>AI 自动诊断</th>
-    </tr></thead><tbody>{rows}</tbody></table></div></body></html>"""
+        body {{ font-family: 'Segoe UI', Tahoma, sans-serif; background: #f4f7f6; padding: 40px; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }}
+        h1 {{ color: #2c3e50; border-bottom: 3px solid #6c8aff; padding-bottom: 10px; margin-bottom: 30px; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }} 
+        th, td {{ padding: 15px; border-bottom: 1px solid #eee; text-align: left; }}
+        th {{ background: #6c8aff; color: white; font-size: 13px; text-transform: uppercase; }}
+        .highlight {{ color: #e74c3c; font-weight: bold; }} .good {{ color: #27ae60; font-weight: bold; }}
+        .formula-section {{ background: #1e222d; color: #e4e6ed; padding: 25px; border-radius: 12px; margin-top: 40px; font-family: 'Consolas', monospace; }}
+        .formula-section h3 {{ color: #6c8aff; margin-top: 0; font-family: sans-serif; }}
+        .formula-item {{ margin-bottom: 15px; border-bottom: 1px solid #2d333f; padding-bottom: 10px; }}
+        .formula-title {{ color: #4ade80; font-weight: bold; margin-bottom: 5px; display: block; }}
+    </style></head><body><div class="container">
+        <h1>SAGE 依存维度异常深度诊断 (Multi-Dimensional Diagnostic)</h1>
+        
+        <table><thead><tr>
+            <th>Role</th><th>总词频</th><th>Unique词数</th><th>Avg词数/角色</th><th>多样性 (Diversity)</th>
+            <th>敏感度 (Sensitivity)</th><th>分配熵 (Entropy)</th><th>AI 自动诊断</th>
+        </tr></thead><tbody>{rows}</tbody></table>
+
+        <div class="formula-section">
+            <h3>📊 指标计算公式说明 (Methodology)</h3>
+            
+            <div class="formula-item">
+                <span class="formula-title">1. 词袋多样性 (Diversity Score)</span>
+                <code>Diversity = 1 - [ Σ cos_sim(x_i, x_j) - N ] / [ N * (N - 1) ]</code><br>
+                <small>计算角色在特定维度下 BoW 向量的平均两两余弦相似度。越接近 1 说明角色间的该维度描写越迥异，越接近 0 说明极其趋同。</small>
+            </div>
+
+            <div class="formula-item">
+                <span class="formula-title">2. Encoder 敏感度 (Sensitivity Std)</span>
+                <code>Sensitivity = mean( std( Encoder_Logits(x)_axis=0 ) )</code><br>
+                <small>将特定维度的特征单独输入 Encoder，计算输出 Logits 在不同角色间的标准差。高 Std 意味着 Encoder 对该维度的输入信号有剧烈反应。</small>
+            </div>
+
+            <div class="formula-item">
+                <span class="formula-title">3. 人格分配熵 (Persona Entropy)</span>
+                <code>Entropy = - Σ [ P(z|x) * log(P(z|x)) ]</code><br>
+                <small>基于 Shannon Entropy。高熵意味着模型对该维度的判断模棱两可；低熵（接近 0）意味着该维度提供了极具确定性的人格分类信号。</small>
+            </div>
+
+            <div class="formula-item">
+                <span class="formula-title">4. 角色平均词数 (Avg Tokens)</span>
+                <code>Avg_Tokens = Total_Tokens_in_Role / Total_Characters</code><br>
+                <small>量化该维度的信息密度。如果 Avg &lt; 1，说明该维度在大多数角色身上是缺失的。</small>
+            </div>
+        </div>
+    </div></body></html>"""
     
     with open(output_html, "w", encoding="utf-8") as f: f.write(html)
     print(f">>> Report saved to {output_html}")
