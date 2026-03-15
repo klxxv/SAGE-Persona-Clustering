@@ -74,8 +74,9 @@ class FlatMixedEffectsDecoder(nn.Module):
     """
     扁平化解码器：Logits = E_bg + E_author[m] + E_persona[z]
     直接对全量词表输出 Softmax，不使用树。
+    支持 Role Mask 以处理不同语法关系的词表差异。
     """
-    def __init__(self, V, M, P, R):
+    def __init__(self, V, M, P, R, role_mask=None):
         super().__init__()
         self.V = V
         # 背景偏置：[R, V]
@@ -84,31 +85,41 @@ class FlatMixedEffectsDecoder(nn.Module):
         self.eta_author = nn.Parameter(torch.zeros(M, R, V))
         # 人格效应：[P, R, V]
         self.eta_persona = nn.Parameter(torch.zeros(P, R, V))
-        
+        # 语法关系掩码：[R, V]
+        self.register_buffer('role_mask', role_mask)
+
     def forward(self, m_idx, z_persona, r_idx):
         """
         z_persona: [batch, P] (Gumbel-Softmax output)
         """
         batch_size = m_idx.shape[0]
-        
+
         # 1. 背景
         bg = self.eta_bg[r_idx] # [batch, V]
-        
+
         # 2. 作者
         # 使用 batch_indices 提取每个样本对应的作者
         author_w = self.eta_author[m_idx, r_idx] # [batch, V]
-        
+
         # 3. 人格 (矩阵乘法解耦)
         # self.eta_persona: [P, R, V] -> reshape [P, R*V]
         pers_flat = self.eta_persona.view(z_persona.shape[1], -1)
         sampled_pers = torch.matmul(z_persona, pers_flat) # [batch, R*V]
         sampled_pers = sampled_pers.view(batch_size, -1, self.V) # [batch, R, V]
-        
+
         # 提取对应 R 的 persona 向量
         batch_indices = torch.arange(batch_size, device=m_idx.device)
         persona_w = sampled_pers[batch_indices, r_idx] # [batch, V]
-        
+
         logits = bg + author_w + persona_w
+
+        # 4. 应用 Role Mask
+        if self.role_mask is not None:
+            # r_idx 是一个 batch 的索引，取对应的 mask
+            current_mask = self.role_mask[r_idx]
+            # 将不属于该 role 的词设置为极小值，从而在 softmax 中概率接近 0
+            logits = logits.masked_fill(current_mask == 0, -1e9)
+
         return F.log_softmax(logits, dim=-1)
 
 # ==========================================
@@ -116,7 +127,7 @@ class FlatMixedEffectsDecoder(nn.Module):
 # ==========================================
 
 class SAGE_CVAE_Flat(nn.Module):
-    def __init__(self, input_dim, M, P, R, hidden_dim=512):
+    def __init__(self, input_dim, M, P, R, role_mask=None, hidden_dim=512):
         super().__init__()
         # Encoder: BoW -> Persona Logits
         self.encoder = nn.Sequential(
@@ -127,7 +138,7 @@ class SAGE_CVAE_Flat(nn.Module):
             nn.Linear(hidden_dim, P)
         )
         # Decoder: Mixed Effects Flat
-        self.decoder = FlatMixedEffectsDecoder(input_dim, M, P, R)
+        self.decoder = FlatMixedEffectsDecoder(input_dim, M, P, R, role_mask=role_mask)
         self.P = P
 
     def forward(self, char_feats, m_idx, r_idx, temp=1.0, hard=True):
@@ -154,17 +165,17 @@ class AdvancedLiterarySAGE:
         self.vocab = df_words['word'].tolist()
         self.word_map = {w: i for i, w in enumerate(self.vocab)}
         self.V = len(self.vocab)
-        
+
         df = pd.read_csv(data_file)
         roles = ['agent', 'patient', 'possessive', 'predicative']
         df = df[df['role'].isin(roles)].copy()
         self.r_map = {r: i for i, r in enumerate(roles)}
         self.R = len(roles)
-        
+
         df = df[df['word'].isin(self.word_map)].copy()
         df['w_idx'] = df['word'].map(self.word_map)
         df["char_key"] = df["book"] + "_" + df["char_id"].astype(str)
-        
+
         return df
 
     def fit(self, df, batch_size=8192, checkpoint_dir='data/results/checkpoints'):
@@ -175,12 +186,21 @@ class AdvancedLiterarySAGE:
         self.m_map = {a: i for i, a in enumerate(authors)}
         char_keys = sorted(df["char_key"].unique())
         self.char_map = {ck: i for i, ck in enumerate(char_keys)}
-        
+
         df['m_idx'] = df['author'].map(self.m_map)
         df['c_idx'] = df['char_key'].map(self.char_map)
         df['r_idx'] = df['role'].map(self.r_map)
-        
+
         self.M, self.C = len(self.m_map), len(self.char_map)
+
+        # 1.1 计算 Role Mask [R, V]
+        print(f">>> Computing Role Mask for {self.R} roles and {self.V} words...")
+        role_mask = torch.zeros(self.R, self.V, device=self.device)
+        for r_name, r_idx in self.r_map.items():
+            valid_words = df[df['role'] == r_name]['w_idx'].unique()
+            role_mask[r_idx, valid_words] = 1.0
+            print(f"    Role {r_name:12}: {len(valid_words):5} unique words")
+        self.role_mask = role_mask
 
         # 2. 准备特征
         char_word_counts = df.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
@@ -191,8 +211,7 @@ class AdvancedLiterarySAGE:
 
         # 3. 初始化模型
         if self.mode == 'cvae_flat':
-            self.model = SAGE_CVAE_Flat(self.V, self.M, self.P, self.R).to(self.device)
-        
+            self.model = SAGE_CVAE_Flat(self.V, self.M, self.P, self.R, role_mask=self.role_mask).to(self.device)        
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
         
         # 准备数据数组
