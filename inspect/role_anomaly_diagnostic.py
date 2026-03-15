@@ -13,7 +13,7 @@ from sage.model import SAGE_CVAE_Flat
 def diagnostic_role_variance():
     # 1. 路径设置
     word_csv = "fullset_data/word2vec_clusters.csv" 
-    data_file = "data/processed/all_words.csv"
+    data_file = "fullset_data/all_words.csv"
     checkpoint_path = "checkpoints/cvae_flat_full/cvae_flat_full_model.pt"
     output_html = "inspect/role_anomaly_report.html"
 
@@ -21,31 +21,62 @@ def diagnostic_role_variance():
     print(f">>> [Diagnostic] Starting deep role analysis on {device}")
 
     # 2. 加载数据
+    if not os.path.exists(data_file):
+        print(f"Error: {data_file} not found. Please run extraction first.")
+        return
+    
     df = pd.read_csv(data_file)
-    df_words = pd.read_csv(word_csv)
-    vocab = df_words['word'].tolist()
+    
+    if not os.path.exists(word_csv):
+        print(f"Warning: {word_csv} not found. Sensitivity analysis will be limited.")
+        # Fallback: simple vocab from data
+        vocab = sorted(df['word'].unique().tolist())
+    else:
+        df_words = pd.read_csv(word_csv)
+        vocab = df_words['word'].tolist()
+        
     word_map = {w: i for i, w in enumerate(vocab)}
     V = len(vocab)
 
     df['char_key'] = df['book'] + "_" + df['char_id'].astype(str)
-    roles = sorted(df['role'].unique().tolist())
+    # 强制指定顺序以匹配模型习惯
+    roles = ['agent', 'patient', 'possessive', 'predicative']
+    available_roles = [r for r in roles if r in df['role'].unique()]
+    
     char_keys = sorted(df['char_key'].unique())
     C = len(char_keys)
     char_to_idx = {ck: i for i, ck in enumerate(char_keys)}
 
-    # 3. 加载 CVAE 模型
-    M = len(df['author'].unique())
-    model = SAGE_CVAE_Flat(V, M, 8, 4).to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-    model.eval()
+    # 3. 尝试加载 CVAE 模型
+    model = None
+    if os.path.exists(checkpoint_path):
+        try:
+            M = len(df['author'].unique())
+            model = SAGE_CVAE_Flat(V, M, 8, 4).to(device)
+            model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+            model.eval()
+            print(f">>> Found model at {checkpoint_path}, enabling sensitivity analysis.")
+        except Exception as e:
+            print(f">>> Failed to load model: {e}. Running data-only diagnostic.")
+    else:
+        print(f">>> No model found at {checkpoint_path}. Running data-only diagnostic.")
 
     # 采样 1000 个角色用于耗时的距离计算
-    sample_size = 1000
+    sample_size = min(1000, C)
     sample_keys = np.random.choice(char_keys, sample_size, replace=False)
     sample_indices = [char_to_idx[k] for k in sample_keys]
 
     stats = []
     for role in roles:
+        if role not in available_roles:
+            print(f">>> Role: {role} is MISSING in data!")
+            stats.append({
+                "Role": role, "Total_Tokens": 0, "Unique_Words": 0,
+                "Avg_Tokens": 0, "Diversity": 0, "Sensitivity": 0,
+                "Entropy": 0, "Diagnosis": "<b style='color:red'>缺失数据</b>"
+            })
+            continue
+
         print(f">>> Analyzing Role: {role}...")
         role_df = df[df['role'] == role].copy()
         total_tokens = role_df['count'].sum()
@@ -60,12 +91,15 @@ def diagnostic_role_variance():
         
         role_feats_norm = F.normalize(torch.tensor(role_feats), p=2, dim=1)
         
-        with torch.no_grad():
-            sample_feats = role_feats_norm[sample_indices].to(device)
-            logits = model.encoder(sample_feats)
-            logits_std = torch.std(logits, dim=0).mean().item()
-            probs = F.softmax(logits, dim=-1)
-            entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean().item()
+        logits_std = 0
+        entropy = 0
+        if model is not None:
+            with torch.no_grad():
+                sample_feats = role_feats_norm[sample_indices].to(device)
+                logits = model.encoder(sample_feats)
+                logits_std = torch.std(logits, dim=0).mean().item()
+                probs = F.softmax(logits, dim=-1)
+                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean().item()
 
         sample_feats_np = role_feats_norm[sample_indices].cpu().numpy()
         cos_sim_matrix = cosine_similarity(sample_feats_np)
@@ -73,9 +107,9 @@ def diagnostic_role_variance():
 
         # 诊断原因
         diagnosis = "正常维度"
-        if diversity < 0.05: diagnosis = "<b>描写同质化</b>：用词在角色间高度重合（如手、脸），无区分度。"
-        elif logits_std < 0.5: diagnosis = "<b>特征盲区</b>：Encoder 对此维度不敏感。"
-        elif tokens_per_char < 1.0: diagnosis = "<b>信息极度稀疏</b>。"
+        if diversity < 0.05: diagnosis = "<b>描写同质化</b>：用词在角色间高度重合。"
+        elif model is not None and logits_std < 0.5: diagnosis = "<b>特征盲区</b>：Encoder 对此维度不敏感。"
+        elif tokens_per_char < 0.5: diagnosis = "<b>信息极度稀疏</b>。"
 
         stats.append({
             "Role": role, "Total_Tokens": int(total_tokens), "Unique_Words": unique_words,

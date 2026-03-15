@@ -4,28 +4,39 @@ import os
 import glob
 import re
 
-txt_dir = r"原始数据\上海_小说_txt_3"
-data_dir = r"原始数据\上海小说_Data"
-out_dir = r"SAGE\fullset_data"
+txt_dir = r"original_text"
+data_dir = r"original_data"
+out_dir = r"fullset_data"
 
 if not os.path.exists(out_dir):
     os.makedirs(out_dir)
 
 # Map book name to author
 book_to_author = {}
-for file in os.listdir(txt_dir):
-    if file.endswith('.txt'):
-        # e.g., A_Case_of_Two_Cities_-_Qiu_Xiaolong.txt
-        # The_Painter_From_Shanghai_-_Jennifer_Cody_Epstein (1).txt
-        match = re.match(r"(.*?)_-_(.*?)(?: \(\d+\))?\.txt", file)
-        if match:
-            book_name = match.group(1)
-            author = match.group(2)
-            book_to_author[book_name] = author
-        else:
-            print(f"Could not parse filename: {file}")
+# Assuming the book txt files are in txt_dir and we can extract author from them
+if os.path.exists(txt_dir):
+    for file in os.listdir(txt_dir):
+        if file.endswith('.txt'):
+            # e.g., A_Case_of_Two_Cities_-_Qiu_Xiaolong.txt
+            match = re.match(r"(.*?)_-_(.*?)(?: \(\d+\))?\.txt", file)
+            if match:
+                book_name = match.group(1)
+                author = match.group(2)
+                book_to_author[book_name] = author
+            else:
+                # Fallback: take filename without extension as book name
+                book_name = os.path.splitext(file)[0]
+                book_to_author[book_name] = "Unknown"
 
 all_rows = []
+
+# Mapping from BookNLP roles to SAGE roles
+ROLE_MAP = {
+    'agent': 'agent',
+    'patient': 'patient',
+    'poss': 'possessive',
+    'mod': 'predicative'
+}
 
 for folder in os.listdir(data_dir):
     if not folder.startswith("output_"):
@@ -59,8 +70,8 @@ for folder in os.listdir(data_dir):
     
     for char in characters:
         char_id = char.get('id')
-        for role in ['agent', 'patient', 'poss', 'mod']:
-            words = char.get(role, [])
+        for bn_role, sage_role in ROLE_MAP.items():
+            words = char.get(bn_role, [])
             word_counts = {}
             for entry in words:
                 word = entry.get('w', '').lower()
@@ -72,7 +83,7 @@ for folder in os.listdir(data_dir):
                     'author': author,
                     'book': book_name,
                     'char_id': char_id,
-                    'role': role,
+                    'role': sage_role,
                     'word': word,
                     'count': count
                 }
