@@ -130,8 +130,29 @@ def run_female_lead_analysis():
     eta_persona = model.decoder.eta_axes.detach().cpu().numpy() if hasattr(model.decoder, 'eta_axes') else model.decoder.eta_persona.detach().cpu().numpy()
     role_names = {0: 'Agent', 1: 'Patient', 2: 'Possessive', 3: 'Predicative'}
     
-    # 建立 char_key 到名字的映射
-    name_map = dict(zip(df_females['book'] + "_" + df_females['char_id'].astype(str), df_females['best_name']))
+    # --- 姓名重解析逻辑 ---
+    print(">>> Resolving real names from raw metadata...")
+    raw_meta_file = "data/raw/all_characters_metadata.csv"
+    name_lookup = {}
+    if os.path.exists(raw_meta_file):
+        df_raw_meta = pd.read_csv(raw_meta_file)
+        # 建立映射: (book, char_id) -> best_name
+        for _, row in df_raw_meta.iterrows():
+            key = (str(row['book']), str(row['char_id']))
+            name_lookup[key] = str(row['best_name'])
+
+    def resolve_name(char_key):
+        parts = char_key.split('_')
+        c_id = parts[-1]
+        b_name = "_".join(parts[:-1])
+        
+        # 优先从元数据查找
+        resolved = name_lookup.get((b_name, c_id))
+        if resolved and resolved != "nan" and not resolved.isdigit():
+            return f"{resolved} ({b_name})"
+        
+        # 兜底方案
+        return f"Lead_{c_id} ({b_name})"
 
     persona_summary = []
     excel_data = []
@@ -140,7 +161,7 @@ def run_female_lead_analysis():
         p_mask = (labels == p)
         if not any(p_mask): continue
         
-        p_chars = [name_map.get(top_female_keys[i], "Unknown") for i, val in enumerate(p_mask) if val]
+        p_chars = [resolve_name(top_female_keys[i]) for i, val in enumerate(p_mask) if val]
         
         # 角色关键词 (即使权重极低也提取)
         p_keywords = {}
