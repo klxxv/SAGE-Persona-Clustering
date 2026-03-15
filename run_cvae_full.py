@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sage.model import AdvancedLiterarySAGE
-from sage.metrics import calculate_silhouette, calculate_latent_silhouette, calculate_flat_perplexity
+from sage.metrics import calculate_silhouette_custom, calculate_latent_silhouette, calculate_flat_perplexity
 
 def check_cuda_environment():
     print("="*50)
@@ -105,7 +105,7 @@ def run_full_cvae():
     row_sums[row_sums == 0] = 1
     char_dists = char_feats / row_sums
     
-    raw_s_score = calculate_silhouette(char_dists, labels)
+    raw_s_score = calculate_silhouette_custom(char_dists, labels)
     latent_s_score, _ = calculate_latent_silhouette(trainer.model, train_df, trainer.device)
     perp = calculate_flat_perplexity(trainer.model, test_df, trainer.device)
     
