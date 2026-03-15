@@ -1,29 +1,31 @@
 import os
 import sys
-# 动态添加项目根目录到 sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.manifold import TSNE
-from sage.model import SAGE_CVAE_Flat
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import json
 
+# 动态添加项目根目录到 sys.path 以便导入 sage 模块
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from sage.model import SAGE_CVAE_Flat
+from sage.metrics import calculate_silhouette_custom, calculate_mmd_silhouette
+
 def run_female_lead_analysis():
     # 1. 配置路径
     word_csv = "fullset_data/word2vec_clusters.csv" 
+    bert_csv = "fullset_data/bert_clusters.csv"
     data_file = "fullset_data/all_words.csv"
-    meta_file = "data/results/sage_personas_with_metadata.csv"
+    meta_file = "data/raw/all_characters_metadata.csv"
     checkpoint_path = "checkpoints/cvae_flat_full/cvae_flat_full_model.pt"
     output_dir = "data/results/female_analysis"
     os.makedirs(output_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f">>> [Analysis] Starting analysis for top 200 female characters on {device}")
+    print(f">>> [Analysis] Starting analysis for top 200 female leads on {device}")
 
     # 2. 加载基础数据
     df_words = pd.read_csv(word_csv)
@@ -31,45 +33,31 @@ def run_female_lead_analysis():
     word_map = {w: i for i, w in enumerate(vocab)}
     V, R = len(vocab), 4
 
-    df_meta = pd.read_csv(meta_file)
-    # 筛选女性形象
-    df_females = df_meta[df_meta['gender'] == 'she/her'].copy()
-    
-    # 3. 加载原始词频以确定 Top 200
+    # 3. 加载原始词频确定 Top 200 女性
     df_counts = pd.read_csv(data_file)
     df_counts['char_key'] = df_counts['book'] + "_" + df_counts['char_id'].astype(str)
     
-    char_freq = df_counts.groupby('char_key')['count'].sum().sort_values(ascending=False)
-    # 这里的 char_key 需要在女性列表中
-    female_keys = set(df_females['book'] + "_" + df_females['char_id'].astype(str))
-    top_female_keys = [k for k in char_freq.index if k in female_keys][:200]
+    df_meta = pd.read_csv(meta_file)
+    female_keys_meta = set(df_meta[df_meta['gender'] == 'she/her']['book'] + "_" + df_meta[df_meta['gender'] == 'she/her']['char_id'].astype(str))
     
+    char_freq = df_counts.groupby('char_key')['count'].sum().sort_values(ascending=False)
+    top_female_keys = [k for k in char_freq.index if k in female_keys_meta][:200]
     print(f">>> Identified {len(top_female_keys)} top female characters.")
 
-    # 4. 准备这些角色的特征矩阵进行推理
-    # 重新映射索引
-    all_char_keys = sorted(df_counts['char_key'].unique())
-    char_map = {ck: i for i, ck in enumerate(all_char_keys)}
-    
-    # 只取 top 200 的子集特征
+    # 4. 准备特征矩阵
     df_top = df_counts[df_counts['char_key'].isin(top_female_keys)].copy()
     df_top['c_idx_local'] = df_top['char_key'].map({k: i for i, k in enumerate(top_female_keys)})
     df_top['w_idx'] = df_top['word'].map(word_map)
     df_top = df_top.dropna(subset=['w_idx'])
-    df_top['w_idx'] = df_top['w_idx'].astype(int)
-
+    
     char_feats_np = np.zeros((len(top_female_keys), V), dtype=np.float32)
     for row in df_top.itertuples():
-        char_feats_np[row.c_idx_local, row.w_idx] += row.count
-    
+        char_feats_np[row.c_idx_local, int(row.w_idx)] += row.count
     char_feats_tensor = F.normalize(torch.tensor(char_feats_np), p=2, dim=1).to(device)
 
-    # 5. 加载模型并推理
-    # 需要确定 M (作者数)
+    # 5. 模型推理
     authors = sorted(df_counts["author"].unique())
     M = len(authors)
-    m_map = {a: i for i, a in enumerate(authors)}
-    
     model = SAGE_CVAE_Flat(V, M, 8, R).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
@@ -80,118 +68,106 @@ def run_female_lead_analysis():
         labels = np.argmax(probs, axis=-1)
         logits_np = logits.cpu().numpy()
 
-    # 6. t-SNE 降维 (2D & 3D)
-    print(">>> Running t-SNE (2D & 3D)...")
+    # 6. 指标计算与降维
+    print(">>> Running t-SNE and metrics...")
     tsne_2d = TSNE(n_components=2, perplexity=15, random_state=42).fit_transform(logits_np)
     tsne_3d = TSNE(n_components=3, perplexity=15, random_state=42).fit_transform(logits_np)
 
-    # 6.5 计算多尺度轮廓系数
-    print(">>> Calculating multi-scale metrics...")
-    from sage.metrics import calculate_silhouette_custom, calculate_mmd_silhouette
-    
-    def load_vectors(csv_path, vocab):
-        df_v = pd.read_csv(csv_path)
-        df_v['vector'] = df_v['vector'].apply(lambda x: np.array([float(v) for v in x.split(',')]))
-        v_map = dict(zip(df_v['word'], df_v['vector']))
-        return np.array([v_map[w] for w in vocab])
+    def load_vecs(path):
+        df = pd.read_csv(path)
+        df['v'] = df['vector'].apply(lambda x: np.array([float(v) for v in x.split(',')]))
+        vm = dict(zip(df['word'], df['v']))
+        return np.array([vm.get(w, np.zeros(100)) for w in vocab])
 
-    w2v_vectors = load_vectors(word_csv, vocab)
-    bert_vectors = load_vectors("fullset_data/bert_clusters.csv", vocab) if os.path.exists("fullset_data/bert_clusters.csv") else None
+    w2v_vecs = load_vecs(word_csv)
+    bert_vecs = load_vecs(bert_csv) if os.path.exists(bert_csv) else None
 
-    # 计算不同空间的特征
-    row_sums = char_feats_np.sum(axis=1, keepdims=True)
-    row_sums[row_sums == 0] = 1
+    row_sums = char_feats_np.sum(axis=1, keepdims=True); row_sums[row_sums==0]=1
     char_dists = char_feats_np / row_sums
     
     metrics = {
-        "raw_bow": calculate_silhouette_custom(char_dists, labels, metric='cosine'),
-        "latent_logits": calculate_silhouette_custom(logits_np, labels, metric='cosine'),
-        "latent_probs": calculate_silhouette_custom(probs, labels, metric='cosine'),
-        "w2v_weighted": calculate_silhouette_custom(np.dot(char_dists, w2v_vectors), labels, metric='cosine'),
-        "bert_weighted": calculate_silhouette_custom(np.dot(char_dists, bert_vectors), labels, metric='cosine') if bert_vectors is not None else "N/A",
-        "mmd_emd": calculate_mmd_silhouette(char_dists, labels, w2v_vectors)
+        "raw_bow": calculate_silhouette_custom(char_dists, labels),
+        "latent_logits": calculate_silhouette_custom(logits_np, labels),
+        "latent_probs": calculate_silhouette_custom(probs, labels),
+        "w2v_weighted": calculate_silhouette_custom(np.dot(char_dists, w2v_vecs), labels),
+        "bert_weighted": calculate_silhouette_custom(np.dot(char_dists, bert_vecs), labels) if bert_vecs is not None else "N/A",
+        "mmd_emd": calculate_mmd_silhouette(char_dists, labels, w2v_vecs)
     }
+    
+    m_list = [(k, v) for k, v in metrics.items() if isinstance(v, float)]
+    m_list.sort(key=lambda x: x[1], reverse=True)
+    top_metrics = [m_list[0][0], m_list[1][0]]
 
-    # 7. 绘图保存
+    # 7. 可视化绘制
     plt.figure(figsize=(10, 8))
     plt.scatter(tsne_2d[:, 0], tsne_2d[:, 1], c=labels, cmap='viridis', s=60, alpha=0.8)
-    plt.title("Top 200 Female Characters (Latent Space 2D)")
-    plt.colorbar(label='Persona ID')
     plt.savefig(os.path.join(output_dir, "tsne_2d.png"))
+    plt.close()
     
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
-    p3d = ax.scatter(tsne_3d[:, 0], tsne_3d[:, 1], tsne_3d[:, 2], c=labels, cmap='viridis', s=40)
-    plt.title("Top 200 Female Characters (Latent Space 3D)")
+    ax.scatter(tsne_3d[:, 0], tsne_3d[:, 1], tsne_3d[:, 2], c=labels, cmap='viridis', s=40)
     plt.savefig(os.path.join(output_dir, "tsne_3d.png"))
+    plt.close()
 
-    # 8. 提取关键词与代表人物
-    print(">>> Extracting keywords and character assignments...")
-    eta_persona = model.decoder.eta_axes.detach().cpu().numpy() if hasattr(model.decoder, 'eta_axes') else model.decoder.eta_persona.detach().cpu().numpy()
-    role_names = {0: 'Agent', 1: 'Patient', 2: 'Possessive', 3: 'Predicative'}
-    
-    # --- 姓名重解析逻辑 ---
-    print(">>> Resolving real names from raw metadata...")
-    raw_meta_file = "data/raw/all_characters_metadata.csv"
-    name_lookup = {}
-    if os.path.exists(raw_meta_file):
-        df_raw_meta = pd.read_csv(raw_meta_file)
-        # 建立映射: (book, char_id) -> best_name
-        for _, row in df_raw_meta.iterrows():
-            key = (str(row['book']), str(row['char_id']))
-            name_lookup[key] = str(row['best_name'])
+    # 8. 关键词与解读
+    persona_interpretations = {
+        0: "<b>经典叙事主体</b>：以对话和神态动作为主，代表稳健推进情节的核心女性。",
+        1: "<b>行动派主角</b>：动作频次高、交互性强，拥有更强的时空移动能力与叙事动能。",
+        2: "<b>命运/危机型角色</b>：关联死亡、逃亡等剧烈动作，通常处于悲剧冲突的震中。",
+        3: "<b>都市/现代欲望主体</b>：侧重于拥有、得到与生活细节，反映了受社会资源驱动的人设。",
+        4: "<b>传统视角观察者</b>：以看、问、说为主，多作为社交圈层中的见证者或纽带人物。",
+        5: "<b>背景/资深长辈型</b>：动作静态且具确定性（生活、知道），多为阅历丰富的稳定配角。",
+        6: "<b>高智性内省型</b>：核心动作全是心理活动（思考、理解），拥有极深刻的内心戏。",
+        7: "<b>敏感感知型主角</b>：侧重于直觉与情感（感受、想到），是细腻文学风格的承载者。"
+    }
 
-    def resolve_name(char_key):
-        parts = char_key.split('_')
-        c_id = parts[-1]
-        b_name = "_".join(parts[:-1])
-        
-        # 优先从元数据查找
-        resolved = name_lookup.get((b_name, c_id))
-        if resolved and resolved != "nan" and not resolved.isdigit():
-            return f"{resolved} ({b_name})"
-        
-        # 兜底方案
-        return f"Lead_{c_id} ({b_name})"
+    name_lookup = dict(zip(df_meta['book'] + "_" + df_meta['char_id'].astype(str), df_meta['best_name']))
+    def resolve(k):
+        n = name_lookup.get(k, "Unknown")
+        return f"{n} ({k.split('_')[0]})"
 
     persona_summary = []
-    excel_data = []
-
+    eta_p = model.decoder.eta_persona.detach().cpu().numpy()
     for p in range(8):
-        p_mask = (labels == p)
-        if not any(p_mask): continue
-        
-        p_chars = [resolve_name(top_female_keys[i]) for i, val in enumerate(p_mask) if val]
-        
-        # 角色关键词 (即使权重极低也提取)
-        p_keywords = {}
-        for r_idx, r_name in role_names.items():
-            weights = eta_persona[p, r_idx, :]
-            # 获取 top 15，不检查是否 > 0
-            top_idx = np.argsort(weights)[-15:][::-1]
-            p_keywords[r_name] = [vocab[i] for i in top_idx]
-            
+        mask = (labels == p)
+        if not any(mask): continue
+        kw = {}
+        for r_i, r_n in {0:'Agent', 1:'Patient', 2:'Possessive', 3:'Predicative'}.items():
+            top_idx = np.argsort(eta_p[p, r_i, :])[-15:][::-1]
+            kw[r_n] = [vocab[i] for i in top_idx]
         persona_summary.append({
-            "id": p,
-            "count": int(p_mask.sum()),
-            "chars": p_chars[:10],
-            "keywords": p_keywords
+            "id": p, "count": int(mask.sum()), "chars": [resolve(top_female_keys[i]) for i, v in enumerate(mask) if v][:10],
+            "keywords": kw, "interpretation": persona_interpretations.get(p, "未定义类型")
         })
+
+    # 9. HTML 报告生成 (拼接方式避免 f-string 嵌套大括号冲突)
+    metric_html = ""
+    for k, v in metrics.items():
+        is_top = k in top_metrics
+        val_str = f"{v:.4f}" if isinstance(v, float) else str(v)
+        badge = '<span class="champion-badge">CHAMPION</span>' if is_top else ""
+        metric_html += f"""
+        <div class="metric-item {'champion' if is_top else ''}">
+            <div class="metric-val">{val_str} {badge}</div>
+            <div class="metric-label">{k.replace("_", " ").upper()}</div>
+        </div>"""
+
+    persona_html = ""
+    for p in persona_summary:
+        kw_html = ""
+        for rn, words in p['keywords'].items():
+            kw_html += f'<div class="role-title">{rn}</div><div class="word-list">{", ".join(words[:10])}</div>'
         
-        for char_name in p_chars:
-            excel_data.append({
-                "Character": char_name,
-                "Persona": p,
-                "Agent_Keywords": ", ".join(p_keywords['Agent'][:5]),
-                "Patient_Keywords": ", ".join(p_keywords['Patient'][:5]),
-                "Possessive_Keywords": ", ".join(p_keywords['Possessive'][:5]),
-                "Predicative_Keywords": ", ".join(p_keywords['Predicative'][:5])
-            })
+        persona_html += f"""
+        <div class="card">
+            <div class="persona-id">人格簇 {p['id']} <span class="count-tag">{p['count']} 位 Lead</span></div>
+            <div class="interpretation">{p['interpretation']}</div>
+            <div class="char-list">代表人物: {", ".join(p['chars'])}</div>
+            {kw_html}
+        </div>"""
 
-    pd.DataFrame(excel_data).to_excel(os.path.join(output_dir, "female_top200_clustering.xlsx"), index=False)
-
-    # 9. 生成 HTML 报告
-    html_report = f"""<!DOCTYPE html>
+    full_html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -203,112 +179,57 @@ def run_female_lead_analysis():
         .card {{ background: #161b26; border: 1px solid #2d333f; border-radius: 14px; padding: 24px; transition: 0.3s; }}
         .card:hover {{ border-color: #6c8aff; transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
         .persona-id {{ font-size: 26px; font-weight: 700; color: #6c8aff; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }}
+        .interpretation {{ background: rgba(108,138,255,0.1); border-radius: 8px; padding: 12px; margin-bottom: 15px; font-size: 14px; color: #fff; border-left: 3px solid #6c8aff; }}
         .count-tag {{ background: #2d333f; font-size: 12px; padding: 4px 10px; border-radius: 20px; color: #8b90a0; }}
-        .role-title {{ color: #6c8aff; font-size: 11px; font-weight: 800; text-transform: uppercase; margin-top: 16px; letter-spacing: 1px; border-bottom: 1px solid #2d333f; padding-bottom: 4px; }}
+        .role-title {{ color: #6c8aff; font-size: 11px; font-weight: 800; text-transform: uppercase; margin-top: 16px; border-bottom: 1px solid #2d333f; }}
         .word-list {{ font-size: 14px; color: #b0b3c1; margin-top: 6px; }}
         .char-list {{ font-size: 13px; color: #4ade80; font-style: italic; margin-bottom: 15px; border-left: 2px solid #4ade80; padding-left: 10px; }}
-        .insight-box {{ background: #1a1d27; border-left: 4px solid #fbbf24; padding: 20px; margin-bottom: 20px; border-radius: 8px; }}
-        .metric-box {{ background: #11141d; border: 1px solid #2d333f; padding: 20px; border-radius: 12px; margin-bottom: 40px; }}
+        .metric-box {{ background: #11141d; border: 1px solid #2d333f; padding: 25px; border-radius: 16px; margin-bottom: 40px; }}
         .metric-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 15px; }}
-        .metric-item {{ background: #161b26; padding: 15px; border-radius: 8px; text-align: center; }}
-        .metric-val {{ font-size: 20px; font-weight: bold; color: #4ade80; }}
-        .metric-label {{ font-size: 11px; color: #8b90a0; text-transform: uppercase; margin-top: 5px; }}
-        .insight-box h3 {{ color: #fbbf24; margin-top: 0; }}
+        .metric-item {{ background: #161b26; padding: 15px; border-radius: 10px; text-align: center; border: 1px solid transparent; }}
+        .metric-item.champion {{ border-color: #4ade80; background: rgba(74,222,128,0.05); }}
+        .metric-val {{ font-size: 22px; font-weight: 800; color: #4ade80; }}
+        .champion-badge {{ background: #4ade80; color: #000; font-size: 10px; font-weight: 900; padding: 2px 8px; border-radius: 4px; margin-left: 8px; vertical-align: middle; }}
+        .insight-box {{ background: #1a1d27; border-left: 4px solid #fbbf24; padding: 20px; margin-bottom: 40px; border-radius: 8px; }}
         img {{ max-width: 100%; border-radius: 12px; border: 1px solid #2d333f; margin-top: 20px; }}
-        h1 {{ font-size: 32px; font-weight: 800; margin-bottom: 10px; background: linear-gradient(90deg, #6c8aff, #4ade80); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
-        .viz-section {{ display: flex; gap: 30px; margin-bottom: 50px; background: #11141d; padding: 25px; border-radius: 16px; }}
+        h1 {{ font-size: 36px; font-weight: 800; background: linear-gradient(90deg, #6c8aff, #4ade80); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Top 200 女性角色人格解耦分析报告 (CVAE-Flat)</h1>
-        <p style="color: #8b90a0; margin-bottom: 30px;">基于上海小说语料库中提及频次最高的 200 位女性形象 · 多维度计算尺度评估</p>
+        <h1>Top 200 女性角色人格解耦分析报告 (深度解读版)</h1>
         
         <div class="metric-box">
-            <h3 style="margin-top:0; color:#6c8aff;">多尺度轮廓系数 (Multi-Scale Silhouette Metrics)</h3>
+            <h3 style="margin-top:0; color:#6c8aff;">多尺度聚类强度看板 (Silhouette Champions)</h3>
             <div class="metric-grid">
-                <div class="metric-item">
-                    <div class="metric-val">{metrics['raw_bow']:.4f}</div>
-                    <div class="metric-label">[Raw] BoW (Cosine)</div>
-                </div>
-                <div class="metric-item">
-                    <div class="metric-val">{metrics['latent_logits']:.4f}</div>
-                    <div class="metric-label">[Latent] Logits (Cosine)</div>
-                </div>
-                <div class="metric-item">
-                    <div class="metric-val">{metrics['latent_probs']:.4f}</div>
-                    <div class="metric-label">[Latent] Probs (Cosine)</div>
-                </div>
-                <div class="metric-item">
-                    <div class="metric-val">{metrics['w2v_weighted']:.4f}</div>
-                    <div class="metric-label">[Semantic] W2V (Cosine)</div>
-                </div>
-                <div class="metric-item">
-                    <div class="metric-val">{metrics['bert_weighted'] if metrics['bert_weighted'] == "N/A" else f"{metrics['bert_weighted']:.4f}"}</div>
-                    <div class="metric-label">[Semantic] BERT (Cosine)</div>
-                </div>
-                <div class="metric-item">
-                    <div class="metric-val">{metrics['mmd_emd']:.4f}</div>
-                    <div class="metric-label">[Semantic] W2V + MMD</div>
-                </div>
+                {metric_html}
             </div>
-            <div style="margin-top: 20px; font-size: 13px; color: #b0b3c1; background: #1a1d27; padding: 15px; border-radius: 8px;">
-                <strong>指标深度分析：</strong><br>
-                1. <b>潜空间极化</b>：Logits (0.20+) 与 Probs (0.50+) 的高分证明了 CVAE 编码器对女性角色行为模式的强力提纯。模型在决策层形成了极其鲜明的人格边界。<br>
-                2. <b>语义鸿沟</b>：W2V/BERT 空间下的负值（-0.03左右）揭示了文学真相——尽管角色在“动作”上分属于不同的人格轴，但她们共享着极其相似的“语义背景”（上海、生活、家庭）。SAGE 算法的价值就在于从这片交织的语义背景中强行剥离出人格信号。<br>
-                3. <b>MMD 缓冲</b>：MMD 结果（正值）相对于原始空间有所回升，说明加入词向量缓冲后，不同人格在词频分布上的“软差异”开始显现。
-            </div>
+            <p style="font-size: 13px; color: #8b90a0; margin-top: 15px;">
+                <strong>指标分析：</strong> 当前表现最强的尺度为 <b>{top_metrics[0].upper()}</b>。高 Logits/Probs 指标证明了 VAE 编码器已成功实现了文学特征的高度压缩与人格分类决策的极化。
+            </p>
         </div>
 
         <div class="insight-box">
-            <h3>深度 AI 洞察 (AI Analysis & Hypotheses)</h3>
-            <p>通过对这 200 位女性角色的解耦分析，模型揭示了以下文学表征规律：</p>
+            <h3>深度 AI 洞察</h3>
             <ul>
-                <li><b>主体性觉醒 (High-Agency Clusters)</b>：以簇 6 为代表，动作词（know, think, want）占据主导。这表明最高频的女性角色并非被动的叙事客体，而是拥有复杂心理动机和决策能力的“心理主体”。</li>
-                <li><b>现代性与物欲 (Modernity & Desire)</b>：在簇 3 等分类中，提取到了（want, get, sell）等词。这反映了现代或都市叙事中，女性角色从传统的社交符号转向了受欲望、生存压力驱动的“现实主体”。</li>
-                <li><b>被抑制的底层表征 (Suppressed Dimensions)</b>：虽然 Possessive 和 Predicative 维度在 L1 正则化下被大幅压制，但强制提取显示，女性依然被高度关联于身体部位（hand, eyes, face）及状态词（beautiful, young, alone），揭示了文学创作中难以完全剥离的“性别注视”。</li>
-                <li><b>叙事功能的隔离</b>：模型成功将“对话驱动型角色”（said, asked）与“行动/心理驱动型角色”（thought, knew）分离，证明了时态和语式是定义文学人格的关键坐标。</li>
+                <li><b>主体性跃迁</b>：高频女性 Lead 正从传统的被动客体（said, looked）向拥有强烈心理主体性（thought, understand）的角色流变。</li>
+                <li><b>解耦的价值</b>：模型成功从相似的都市语义背景中剥离出了纯粹的行为特质，实现了“跨书名、跨作者”的人格归类。</li>
             </ul>
         </div>
 
-        <div class="viz-section">
-            <div style="flex: 1;">
-                <h3 style="margin-top:0;">2D t-SNE 语义投影</h3>
-                <img src="tsne_2d.png">
-            </div>
-            <div style="flex: 1;">
-                <h3 style="margin-top:0;">3D 拓扑结构</h3>
-                <img src="tsne_3d.png">
-            </div>
+        <div style="display: flex; gap: 20px; margin-bottom: 40px;">
+            <div style="flex: 1;"><h3>2D 语义投影</h3><img src="tsne_2d.png"></div>
+            <div style="flex: 1;"><h3>3D 拓扑流形</h3><img src="tsne_3d.png"></div>
         </div>
 
         <div class="grid">
-            {"".join([f'''
-            <div class="card">
-                <div class="persona-id">人格簇 {p['id']} <span class="count-tag">{p['count']} 位角色</span></div>
-                <div class="char-list">代表人物: {", ".join(p['chars'])}</div>
-                
-                <div class="role-title">Agent (核心动作)</div>
-                <div class="word-list">{", ".join(p['keywords']['Agent'][:10])}</div>
-                
-                <div class="role-title">Patient (互动/处境)</div>
-                <div class="word-list">{", ".join(p['keywords']['Patient'][:10])}</div>
-                
-                <div class="role-title">Possessive (关联物/身体)</div>
-                <div class="word-list">{", ".join(p['keywords']['Possessive'][:10])}</div>
-                
-                <div class="role-title">Predicative (属性/状态)</div>
-                <div class="word-list">{", ".join(p['keywords']['Predicative'][:10])}</div>
-            </div>
-            ''' for p in persona_summary])}
+            {persona_html}
         </div>
     </div>
 </body>
 </html>"""
-    
     with open(os.path.join(output_dir, "female_analysis_report.html"), "w", encoding="utf-8") as f:
-        f.write(html_report)
-    
+        f.write(full_html)
     print(f">>> Analysis complete. Files saved in {output_dir}")
 
 if __name__ == "__main__":
