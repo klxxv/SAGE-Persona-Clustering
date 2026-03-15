@@ -55,8 +55,8 @@ def train_word2vec_embeddings(words, corpus, embedding_dim=100, workers=4):
     print(f"Extracted {len(embedding_dict)} word vectors.")
     return embedding_dict
 
-def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=32):
-    """Generate BERT embeddings for a list of words."""
+def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=128):
+    """Generate BERT embeddings for a list of words using GPU if available."""
     print(f">>> Loading BERT model: {model_name}...")
     tokenizer = BertTokenizer.from_pretrained(model_name)
     model = BertModel.from_pretrained(model_name)
@@ -64,7 +64,7 @@ def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=32):
     model.to(device)
     model.eval()
 
-    print(f"Generating BERT embeddings on device: {device}...")
+    print(f"Generating BERT embeddings on device: {device} | Batch Size: {batch_size}")
     word_vectors = {}
     word_list = list(words)
 
@@ -73,7 +73,8 @@ def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=32):
             batch = word_list[i:i + batch_size]
             inputs = tokenizer(batch, return_tensors='pt', padding=True, truncation=True).to(device)
             outputs = model(**inputs)
-            embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+            # Use [CLS] token or mean pooling
+            embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
             for word, embedding in zip(batch, embeddings):
                 word_vectors[word] = embedding
     
@@ -82,8 +83,9 @@ def get_bert_embeddings(words, model_name='bert-base-uncased', batch_size=32):
 
 def perform_kmeans(embedding_dict, n_clusters=1000, use_pca=False, pca_components=100):
     """
-    Performs K-Means and adds the final vector representation to the output.
+    Performs K-Means. Uses MiniBatchKMeans for speed if data is large.
     """
+    from sklearn.cluster import MiniBatchKMeans
     print(f">>> Performing K-Means clustering with {n_clusters} clusters...")
     
     words = list(embedding_dict.keys())
@@ -95,7 +97,8 @@ def perform_kmeans(embedding_dict, n_clusters=1000, use_pca=False, pca_component
         vectors = pca.fit_transform(vectors)
         print("PCA complete.")
     
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    # Use MiniBatchKMeans for significant speedup
+    kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024, n_init=3)
     cluster_labels = kmeans.fit_predict(vectors)
     
     # Convert final vectors to a string format for CSV compatibility
