@@ -40,28 +40,22 @@ class FlatContinuousDecoder(nn.Module):
         self.V = V
         self.eta_bg = nn.Parameter(torch.zeros(R, V))
         self.eta_author = nn.Parameter(torch.zeros(M, R, V))
-        
-        # 这里的 eta_axes 不再是互斥的人格，而是 K 个独立的语义特征轴
         self.eta_axes = nn.Parameter(torch.zeros(K, R, V))
         
-    def forward(self, m_idx, z, r_idx):
+    def forward(self, m_idx, z):
         """
-        z: [batch, K] (从正态分布中采样出的连续坐标)
+        m_idx: [Batch_size] 批次角色的作者ID
+        z: [Batch_size, K] 批次角色的连续坐标
         """
-        batch_size = m_idx.shape[0]
+        bg = self.eta_bg # [R, V]
+        author_w = self.eta_author[m_idx] # [B, R, V]
         
-        bg = self.eta_bg[r_idx] # [batch, V]
-        author_w = self.eta_author[m_idx, r_idx] # [batch, V]
+        # 爱因斯坦求和约定 (einsum)：完美的高维矩阵乘法，避免巨大的显存开销
+        # b: batch, k: axes, r: role, v: vocab
+        axes_w = torch.einsum('bk, krv -> brv', z, self.eta_axes) # [B, R, V]
         
-        # 线性组合特征轴: z * eta_axes
-        axes_flat = self.eta_axes.view(z.shape[1], -1)
-        sampled_axes = torch.matmul(z, axes_flat) # [batch, R*V]
-        sampled_axes = sampled_axes.view(batch_size, -1, self.V) # [batch, R, V]
-        
-        batch_indices = torch.arange(batch_size, device=m_idx.device)
-        axes_w = sampled_axes[batch_indices, r_idx] # [batch, V]
-        
-        logits = bg + author_w + axes_w
+        # 混合效应叠加并计算概率
+        logits = bg.unsqueeze(0) + author_w + axes_w # [B, R, V]
         return F.log_softmax(logits, dim=-1)
 
 # ==========================================
@@ -83,14 +77,14 @@ class SAGE_BetaVAE(nn.Module):
         else:
             return mu # 推理时直接使用均值
 
-    def forward(self, char_feats, m_idx, r_idx):
+    def forward(self, char_feats, m_idx):
         mu, logvar = self.encoder(char_feats)
         z = self.reparameterize(mu, logvar)
-        log_probs = self.decoder(m_idx, z, r_idx)
+        log_probs = self.decoder(m_idx, z)
         return log_probs, mu, logvar, z
 
 # ==========================================
-# 4. 训练器
+# 4. 训练器 (Character-Level Mini-batching)
 # ==========================================
 class BetaLiterarySAGE:
     def __init__(self, n_axes=5, beta=2.0, l1_lambda=1e-5, iters=100):
@@ -127,54 +121,77 @@ class BetaLiterarySAGE:
         df['m_idx'] = df['author'].map(self.m_map)
         df['c_idx'] = df['char_key'].map(self.char_map)
         df['r_idx'] = df['role'].map(self.r_map)
-        
         self.M, self.C = len(self.m_map), len(self.char_map)
 
+        # 1. 构建角色的特征矩阵 [C, V] (CPU内存安全)
+        print(">>> Preparing memory-efficient character features...")
         char_word_counts = df.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
-        char_feats = np.zeros((self.C, self.V))
+        char_feats = np.zeros((self.C, self.V), dtype=np.float32)
         char_feats[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
-        char_feats = torch.tensor(char_feats, dtype=torch.float32).to(self.device)
-        char_feats = F.normalize(char_feats, p=2, dim=1)
+        char_feats_cpu = F.normalize(torch.tensor(char_feats), p=2, dim=1)
 
+        # 2. 高效的数据索引预处理 (防止构建 5GB 的巨型目标矩阵导致 OOM)
+        df_sorted = df.sort_values('c_idx')
+        c_idx_np = df_sorted['c_idx'].values
+        r_idx_arr = torch.tensor(df_sorted['r_idx'].values, dtype=torch.long)
+        w_idx_arr = torch.tensor(df_sorted['w_idx'].values, dtype=torch.long)
+        count_arr = torch.tensor(df_sorted['count'].values, dtype=torch.float32)
+        
+        char_start_idx = np.searchsorted(c_idx_np, np.arange(self.C), side='left')
+        char_end_idx = np.searchsorted(c_idx_np, np.arange(self.C), side='right')
+
+        char_to_author_cpu = torch.tensor(df.groupby('c_idx')['m_idx'].first().values, dtype=torch.long)
+
+        # 3. 初始化模型
         self.model = SAGE_BetaVAE(self.V, self.M, self.K, self.R).to(self.device)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
         
-        batch_m = torch.tensor(df['m_idx'].values, device=self.device)
-        batch_c = torch.tensor(df['c_idx'].values, device=self.device)
-        batch_r = torch.tensor(df['r_idx'].values, device=self.device)
-        batch_w = torch.tensor(df['w_idx'].values, device=self.device)
-        batch_count = torch.tensor(df['count'].values, dtype=torch.float32, device=self.device)
+        # 按照角色 (Character) 进行 Batch，而不是 Token！
+        batch_size = 256 # 每次处理 256 个角色，极度节省显存
 
-        dataset_size = len(batch_m)
-        batch_size = 10000
-
-        print(f">>> Training Beta-VAE with {self.K} continuous axes...")
+        print(f">>> Training Beta-VAE over {self.C} characters with Character-Level batch size {batch_size}...")
         pbar = tqdm(range(self.iters))
         for it in pbar:
             self.model.train()
-            permutation = torch.randperm(dataset_size, device=self.device)
+            permutation = torch.randperm(self.C)
             epoch_recon_loss = 0.0; epoch_kl_loss = 0.0; epoch_l1_loss = 0.0
             steps = 0
             
-            for i in range(0, dataset_size, batch_size):
+            for i in range(0, self.C, batch_size):
                 optimizer.zero_grad()
-                indices = permutation[i:i+batch_size]
-                b_m, b_c, b_r, b_w, b_count = batch_m[indices], batch_c[indices], batch_r[indices], batch_w[indices], batch_count[indices]
+                b_c = permutation[i:i+batch_size] # 抽取 B 个角色
                 
-                log_probs, mu, logvar, z = self.model(char_feats[b_c], b_m, b_r)
+                # 将该批次的特征推入 GPU
+                b_m = char_to_author_cpu[b_c].to(self.device)
+                b_feats = char_feats_cpu[b_c].to(self.device)
                 
-                # 1. 重构损失
-                recon_loss = -torch.sum(log_probs[torch.arange(len(b_w)), b_w] * b_count) / b_count.sum()
+                # 动态构建真实标签张量 [B, R, V]，只占用极小内存 (如 30MB)
+                b_counts = torch.zeros((len(b_c), self.R, self.V), device=self.device)
+                for batch_idx, char_id in enumerate(b_c):
+                    start, end = char_start_idx[char_id], char_end_idx[char_id]
+                    if start < end:
+                        roles = r_idx_arr[start:end].to(self.device)
+                        words = w_idx_arr[start:end].to(self.device)
+                        cnts = count_arr[start:end].to(self.device)
+                        b_counts[batch_idx, roles, words] = cnts
                 
-                # 2. 连续正态分布的 KL 散度 (逼近 N(0, I))
-                # 均值计算时考虑 batch 大小以保持稳定
-                kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
+                total_words_in_batch = b_counts.sum()
+                if total_words_in_batch == 0: continue
+                
+                # 前向传播 (极其迅速)
+                log_probs, mu, logvar, z = self.model(b_feats, b_m)
+                
+                # 1. 准确的 ELBO 重构损失 (按 Token 均摊以稳定梯度)
+                recon_loss = -torch.sum(log_probs * b_counts) / total_words_in_batch
+                
+                # 2. 准确的 KL 散度 (每个角色仅计算一次，不再跟单词数量挂钩)
+                kl_divergences = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+                kl_loss = torch.sum(kl_divergences) / total_words_in_batch
                 
                 # 3. L1 稀疏约束
                 l1_loss = torch.sum(torch.abs(self.model.decoder.eta_author)) + \
                           torch.sum(torch.abs(self.model.decoder.eta_axes))
                 
-                # 引入 beta 权重
                 loss = recon_loss + self.beta * kl_loss + self.l1_lambda * l1_loss
                 loss.backward()
                 optimizer.step()
@@ -192,5 +209,5 @@ class BetaLiterarySAGE:
 
         self.model.eval()
         with torch.no_grad():
-            self.z_assignments, _ = self.model.encoder(char_feats)
+            self.z_assignments, _ = self.model.encoder(char_feats_cpu.to(self.device))
             self.z_assignments = self.z_assignments.cpu().numpy()
