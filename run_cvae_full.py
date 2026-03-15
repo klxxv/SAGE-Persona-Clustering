@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sage.model import AdvancedLiterarySAGE
-from sage.metrics import calculate_silhouette_custom, calculate_latent_silhouette, calculate_flat_perplexity
+from sage.metrics import calculate_silhouette_custom, calculate_flat_perplexity
 
 def check_cuda_environment():
     print("="*50)
@@ -106,11 +106,18 @@ def run_full_cvae():
     char_dists = char_feats / row_sums
     
     raw_s_score = calculate_silhouette_custom(char_dists, labels)
-    latent_s_score, _ = calculate_latent_silhouette(trainer.model, train_df, trainer.device)
+    
+    # 准备 test_df 的索引
+    test_df = test_df[test_df['author'].isin(trainer.m_map)].copy()
+    test_df['m_idx'] = test_df['author'].map(trainer.m_map)
+    test_df['r_idx'] = test_df['role'].map(trainer.r_map)
+    test_char_keys = sorted(test_df['char_key'].unique())
+    test_char_map = {ck: i for i, ck in enumerate(test_char_keys)}
+    test_df['c_idx'] = test_df['char_key'].map(test_char_map)
+
     perp = calculate_flat_perplexity(trainer.model, test_df, trainer.device)
     
     print(f"    [Raw Space] Silhouette Score   : {raw_s_score:.4f}")
-    print(f"    [Latent Space] Silhouette Score: {latent_s_score:.4f}")
     print(f"    [Test Set] Perplexity          : {perp:.4f}")
 
     # 7. 提取特征词
