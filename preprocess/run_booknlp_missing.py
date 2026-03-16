@@ -1,6 +1,9 @@
 import os
-import subprocess
 import glob
+import shutil
+from datetime import datetime
+from booknlp.booknlp import BookNLP
+from tqdm import tqdm
 
 # Missing books list (simplified names to match original_text files)
 # Note: I will use partial matching to find the actual filenames
@@ -24,8 +27,17 @@ def run_booknlp():
 
     # Get all txt files
     all_txt_files = glob.glob(os.path.join(text_dir, "*.txt"))
+
+    # Initialize BookNLP
+    model_params = {
+        "pipeline": "entity,quote,supersense,event,coref",
+        "model": "small"
+    }
+    print(">>> Initializing BookNLP (small model)...")
+    booknlp = BookNLP("en", model_params)
     
-    for book_pattern in MISSING_BOOKS:
+    print("\n>>> Starting book processing...")
+    for book_pattern in tqdm(MISSING_BOOKS, desc="Processing Books"):
         # Find the specific file
         target_file = None
         for txt_file in all_txt_files:
@@ -34,48 +46,31 @@ def run_booknlp():
                 break
         
         if not target_file:
-            print(f"!!! Could not find text file for pattern: {book_pattern}")
+            print(f"\n!!! Could not find text file for pattern: {book_pattern}")
             continue
             
         # Create output directory: original_data/output_BookName
         book_name = book_pattern # or extract from filename
         output_dir = os.path.join(output_base_dir, f"output_{book_name}")
         
-        # BACKUP LOGIC: Move existing .html to backup folder
+        # BACKUP LOGIC: Backup the entire existing folder
         if os.path.exists(output_dir):
-            backup_dir = os.path.join(output_base_dir, "old_html_backups", f"output_{book_name}")
-            os.makedirs(backup_dir, exist_ok=True)
-            for html_file in glob.glob(os.path.join(output_dir, "*.html")):
-                import shutil
-                shutil.copy(html_file, backup_dir)
-                print(f"Backed up: {os.path.basename(html_file)} to {backup_dir}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_dir = os.path.join(output_base_dir, "old_backups", f"output_{book_name}_{timestamp}")
+            os.makedirs(os.path.dirname(backup_dir), exist_ok=True)
+            print(f"\n>>> Backing up existing output to: {backup_dir}")
+            shutil.move(output_dir, backup_dir)
 
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
             
         print(f"\n>>> Processing: {target_file}")
         print(f">>> Output to: {output_dir}")
         
-        # Construct the command
-        # booknlp --target_file <FILE> --output_dir <DIR> --model_size small --id <ID>
-        # Using subprocess to call the CLI version
-        cmd = [
-            "booknlp",
-            "--target_file", target_file,
-            "--output_dir", output_dir,
-            "--model_size", "small",
-            "--id", book_name
-        ]
-        
         try:
-            # Note: This requires booknlp to be installed in the environment
-            subprocess.run(cmd, check=True)
+            booknlp.process(target_file, output_dir, book_name)
             print(f">>> Successfully processed {book_name}")
-        except subprocess.CalledProcessError as e:
-            print(f"!!! Error processing {book_name}: {e}")
-        except FileNotFoundError:
-            print("!!! Error: 'booknlp' command not found. Please ensure it is installed and in your PATH.")
-            break
+        except Exception as e:
+            print(f"\n!!! Error processing {book_name}: {e}")
 
 if __name__ == "__main__":
     run_booknlp()
