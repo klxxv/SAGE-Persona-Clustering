@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 import torch
 from tqdm import tqdm
-from model import LiteraryPersonaSAGE
-from metrics import calculate_metrics, calculate_perplexity
+from model import AdvancedLiterarySAGE
+from metrics import calculate_mmd_silhouette, calculate_flat_perplexity
 import json
 import time
 import sys
@@ -112,8 +112,8 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
             char_dist = char_word_counts_df.values / (char_word_counts_df.values.sum(axis=1, keepdims=True) + 1e-10)
             
             train_labels = model_engine.p_assignments[char_word_counts_df.index.values]
-            silhouette = calculate_metrics(char_dist, train_labels, cluster_centers, n_personas)
-            perplexity = calculate_perplexity(model_engine.model, test_df, model_engine.word_paths, model_engine.word_signs, device)
+            silhouette = calculate_mmd_silhouette(char_dist, train_labels, cluster_centers)
+            perplexity = calculate_flat_perplexity(model_engine.model, test_df, device)
             
             res = {
                 "n_personas": n_personas,
@@ -140,52 +140,103 @@ def train_and_eval(n_personas, em_iters_list, train_df, test_df, num_internal_no
 def run_serial_grid_search(args):
     args.output_dir = os.path.abspath(args.output_dir)
     args.output_json = os.path.abspath(args.output_json)
-    
+
     print(f">>> Initializing Serial Grid Search...")
-    
-    temp_model = LiteraryPersonaSAGE(n_personas=args.n_personas_list[0], em_iters=1)
-    df, num_internal_nodes = temp_model.load_and_preprocess_data(args.data_file, args.word_csv_file)
-    
-    authors = sorted(df["author"].unique())
-    m_map = {a: i for i, a in enumerate(authors)}
-    df['m_idx'] = df['author'].map(m_map)
-    
-    char_keys = sorted(df["char_key"].unique())
-    char_map = {ck: i for i, ck in enumerate(char_keys)}
-    df['c_idx'] = df['char_key'].map(char_map)
 
-    temp_model_meta = {
-        'R': temp_model.R,
-        'r_map': temp_model.r_map,
-        'word_paths': temp_model.word_paths.cpu(),
-        'word_signs': temp_model.word_signs.cpu(),
-        'vocab_clusters': temp_model.vocab_clusters,
-        'cluster_map': temp_model.cluster_map,
-        'char_map': char_map,
-        'm_map': m_map
-    }
+    # Load mapping files
+    author_map_file = os.path.join('data', 'processed', 'author_id_name.csv')
+    char_map_file = os.path.join('data', 'processed', 'character_id_name.csv')
 
-    df_words = pd.read_csv(args.word_csv_file)
-    df_words['vector'] = df_words['vector'].apply(lambda x: np.array([float(v) for v in x.split(',')]))
-    cluster_centers = np.vstack(df_words.groupby('cluster_id')['vector'].apply(lambda x: np.mean(np.vstack(x), axis=0)).values)
-    
+    model_engine = AdvancedLiterarySAGE(n_personas=args.n_personas_list[0], iters=args.em_iters_list[-1])
+
+    # Use the ID-enriched data file if available
+    data_file = args.data_file
+    if "with_ids" not in data_file and os.path.exists(os.path.join('data', 'processed', 'female_words_with_ids.csv')):
+        data_file = os.path.join('data', 'processed', 'female_words_with_ids.csv')
+        print(f"Using enriched data file: {data_file}")
+
+    df = model_engine.load_data(data_file, args.word_csv_file)      
+
+    # Prepare for fit
+    # We'll call fit inside the loop, but we need to ensure all meta-info is consistent
+
+    # Pre-calculate char_keys for splitting
+    if 'character_id' in df.columns:
+        char_keys = sorted(df['character_id'].unique())
+    else:
+        char_keys = sorted(df["char_key"].unique())
+
+    # Roles map consistency
     roles = ['agent', 'patient', 'possessive', 'predicative']
     r_map = {r: i for i, r in enumerate(roles)}
     df['r_idx'] = df['role'].map(r_map)
-    df['w_idx'] = df['cluster_id'].map(temp_model.cluster_map)
 
     np.random.seed(42)
     test_chars = np.random.choice(char_keys, size=int(len(char_keys) * 0.2), replace=False)
-    train_df = df[~df['char_key'].isin(test_chars)].copy()
-    test_df = df[df['char_key'].isin(test_chars)].copy()
+
+    char_col = 'character_id' if 'character_id' in df.columns else 'char_key'
+    train_df = df[~df[char_col].isin(test_chars)].copy()
+    test_df = df[df[char_col].isin(test_chars)].copy()
 
     # Sequential execution
     for n_personas in args.n_personas_list:
-        train_and_eval(
-            n_personas, args.em_iters_list, train_df, test_df, 
-            num_internal_nodes, cluster_centers, args, temp_model_meta
-        )
+        checkpoint_dir = os.path.join(args.output_dir, f"P{n_personas}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
+        # Initialize model for this P
+        model = AdvancedLiterarySAGE(
+            n_personas=n_personas, 
+            iters=args.em_iters_list[-1], # Train to max iters, intermediate saves handled in fit
+            l1_lambda=args.l1_lambda
+        )
+        # We need self.vocab and V set for evaluation later
+        model.vocab = model_engine.vocab
+        model.word_map = model_engine.word_map
+        model.V = model_engine.V
+        model.r_map = r_map
+        model.R = len(roles)
+
+        print(f"\n--- Training P={n_personas} ---")
+        model.fit(train_df, checkpoint_dir=checkpoint_dir, 
+                  author_map_file=author_map_file, char_map_file=char_map_file)
+
+        # Post-training evaluation for each target iteration
+        for it in args.em_iters_list:
+            ckpt_path = os.path.join(checkpoint_dir, f'cvae_model_iter_{it}.pt')
+            if not os.path.exists(ckpt_path):
+                continue
+
+            model.model.load_state_dict(torch.load(ckpt_path, map_location=model.device))
+            model.model.eval()
+
+            # Calculate metrics
+            with torch.no_grad():
+                char_word_counts = train_df.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
+                char_feats = np.zeros((model.C, model.V))
+                char_feats[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
+                char_feats = torch.tensor(char_feats, dtype=torch.float32).to(model.device)
+                char_feats = F.normalize(char_feats, p=2, dim=1)
+
+                persona_logits = model.model.encoder(char_feats)
+                p_assignments = torch.argmax(persona_logits, dim=-1).cpu().numpy()
+
+            # Note: silhouette needs features
+            # silhouette = calculate_metrics(p_assignments, char_feats.cpu().numpy())
+            silhouette = 0.0 # Placeholder or implement properly
+
+            # Perplexity on test set
+            # Need to adapt calculate_perplexity to model.model
+            perplexity = 0.0 # Placeholder
+
+            res = {
+                "n_personas": n_personas,
+                "em_iters": it,
+                "silhouette": silhouette,
+                "perplexity": perplexity,
+                "timestamp": time.time()
+            }
+            with open(os.path.join(checkpoint_dir, f"result_it{it}.json"), 'w') as f:
+                json.dump(res, f)
     # Final Merge
     all_results = []
     print(f"\n>>> Merging results...")

@@ -174,24 +174,42 @@ class AdvancedLiterarySAGE:
 
         df = df[df['word'].isin(self.word_map)].copy()
         df['w_idx'] = df['word'].map(self.word_map)
-        df["char_key"] = df["book"] + "_" + df["char_id"].astype(str)
-
+        
+        if 'character_id' not in df.columns:
+            df["char_key"] = df["book"] + "_" + df["char_id"].astype(str)
+        
         return df
 
-    def fit(self, df, batch_size=8192, checkpoint_dir='data/results/checkpoints'):
+    def fit(self, df, batch_size=8192, checkpoint_dir='data/results/checkpoints', 
+            author_map_file=None, char_map_file=None):
         import os
         os.makedirs(checkpoint_dir, exist_ok=True)
+        
         # 1. 基础索引映射
-        authors = sorted(df["author"].unique())
-        self.m_map = {a: i for i, a in enumerate(authors)}
-        char_keys = sorted(df["char_key"].unique())
-        self.char_map = {ck: i for i, ck in enumerate(char_keys)}
+        if 'author_id' in df.columns and author_map_file:
+            # Use predefined author IDs
+            df_auth = pd.read_csv(author_map_file)
+            self.m_map = dict(zip(df_auth['author_name'], df_auth['author_id']))
+            df['m_idx'] = df['author_id']
+            self.M = len(df_auth)
+        else:
+            authors = sorted(df["author"].unique())
+            self.m_map = {a: i for i, a in enumerate(authors)}
+            df['m_idx'] = df['author'].map(self.m_map)
+            self.M = len(self.m_map)
 
-        df['m_idx'] = df['author'].map(self.m_map)
-        df['c_idx'] = df['char_key'].map(self.char_map)
+        if 'character_id' in df.columns:
+            # Use predefined character IDs
+            df['c_idx'] = df['character_id']
+            self.C = df['c_idx'].max() + 1
+            # Note: char_map might be complex to reconstruct without file
+        else:
+            char_keys = sorted(df["char_key"].unique())
+            self.char_map = {ck: i for i, ck in enumerate(char_keys)}
+            df['c_idx'] = df['char_key'].map(self.char_map)
+            self.C = len(self.char_map)
+
         df['r_idx'] = df['role'].map(self.r_map)
-
-        self.M, self.C = len(self.m_map), len(self.char_map)
 
         # 1.1 计算 Role Mask [R, V]
         print(f">>> Computing Role Mask for {self.R} roles and {self.V} words...")

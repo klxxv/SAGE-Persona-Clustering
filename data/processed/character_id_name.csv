@@ -1,124 +1,154 @@
-﻿book,name,character_id
-A Case of Two Cities,An Jiayi,0
-A Case of Two Cities,Catherine Rohn,1
-A Case of Two Cities,Peiqin,2
-A Case of Two Cities,White Cloud,3
-A Loyal Character Dancer,Catherine Rohn,4
-A Loyal Character Dancer,Wen Liping,5
-All the Flowers in Shanghai,Ma,6
-All the Flowers in Shanghai,Madam Zhang,7
-All the Flowers in Shanghai,Ming,8
-All the Flowers in Shanghai,Sang Feng Feng (narrator),9
-All the Flowers in Shanghai,Sister,10
-All the Flowers in Shanghai,Yan,11
-All the Flowers in Shanghai,Yu,12
-Becoming Madame Mao,Yunhe / Lan Ping / Nora,13
-Blue Hunger,Xu,14
-Blue Hunger,"narrator, Ruben",15
-Death of a Red Heroine,Guan Hongying,16
-Death of a Red Heroine,Peiqin,17
-Death of a Red Heroine,Wang Feng,18
-Don't Cry Tai Lake,Mrs. Liu,19
-Don't Cry Tai Lake,Peiqin,20
-Dragon Springs Road,Anna Shea,21
-Dragon Springs Road,Fox,22
-Dragon Springs Road,Grandmother Yang,23
-Dragon Springs Road,Leah,24
-Dragon Springs Road,Miss Morris,25
-Dragon Springs Road,Mrs. Hao,26
-Dragon Springs Road,Ping Mei,27
-Dragon Springs Road,Yang Anjuin,28
-Dragon Springs Road,Zhu Jialing (narrator),29
-Dreams of Joy,Auntie Hu,30
-Dreams of Joy,Joy Louie (narrator),31
-Dreams of Joy,May,32
-Dreams of Joy,Pearl Chin (narrator),33
-Empire of the Sun,Mrs. Ballard,34
-Empire of the Sun,Mrs. Vincent,35
-Enigma of China,Lianping,36
-Enigma of China,Peiqin,37
-Five Star Billionaire,Leong Yinghui,38
-Five Star Billionaire,Phoebe Chen Aiping,39
-Five Star Billionaire,Yanyan,40
-Five Star Billionaire,Zhou X,41
-Half a Lifelong Romance,Ah Bao,42
-Half a Lifelong Romance,Granny,43
-Half a Lifelong Romance,Gu Manlu,44
-Half a Lifelong Romance,Gu Manzhen,45
-Half a Lifelong Romance,Mrs. Gu,46
-Half a Lifelong Romance,Mrs. Hsu,47
-Half a Lifelong Romance,Mrs. Shen,48
-Half a Lifelong Romance,Shi Tsuizhi,49
-My Favourite Wife,Alice Greene,50
-My Favourite Wife,Becca Holden,51
-My Favourite Wife,Holly Holden,52
-My Favourite Wife,JinJin Li,53
-My Favourite Wife,Nancy Deng,54
-My Favourite Wife,Rosalita,55
-My Favourite Wife,Tess Devlin,56
-Night in Shanghai,Anya Petrova,57
-Night in Shanghai,Song Yuhua,58
-Peach Blossom Pavilion,Aunty Ah Ping,59
-Peach Blossom Pavilion,Fang Rong,60
-Peach Blossom Pavilion,Mother,61
-Peach Blossom Pavilion,Pearl,62
-Peach Blossom Pavilion,Spring Moon,63
-Peach Blossom Pavilion,Xiang Xiang (narrator),64
-Rabbit Moon,Claire Litvak,65
-Rabbit Moon,Grace Litvak (narrator),66
-Rabbit Moon,Lindsey Litvak,67
-Rabbit Moon,Mei,68
-Red Mandarin Dress,Jasmine / Tian Mo,69
-Red Mandarin Dress,Mei,70
-Red Mandarin Dress,Peiqin,71
-Red Mandarin Dress,White Cloud,72
-Shanghai,Florence Burke,73
-Shanghai,Irina,74
-Shanghai,Leah Auerbach,75
-Shanghai Girls,Betsy Howell,76
-Shanghai Girls,Mama Chin (Madame Chin),77
-Shanghai Girls,May Chin,78
-Shanghai Girls,Pearl Chin (narrator),79
-Shanghai Immortal,Lady Gi (Gigi),80
-Shanghai Immortal,"Lady Jing (Jing, Hu Xian Jing，narrator)",81
-Shanghai Redemption,Peiqin,82
-Shanghai Redemption,Qian,83
-Shanghai Redemption,White Cloud (Bai),84
-Shanghailanders,"Doroteia ""Teia""",85
-Shanghailanders,Eko Yang,86
-Shanghailanders,Kiko Yang,87
-Shanghailanders,Yoko Yang,88
-Shanghailanders,Yumi Yang,89
-Sour Heart,Mande (narrator),90
-The Binding Chair,Agnes,91
-The Binding Chair,Alice Benjamin,92
-The Binding Chair,Dolly Benjamin (nee Cohen),93
-The Binding Chair,Eleanor Clusburtson,94
-The Binding Chair,May (Chao-tsing / May-li Cohen),95
-The Distant Land of My Father,Anna Schoene (Anna / Anna Shoen Bradley),96
-The Distant Land of My Father,Eve,97
-The Far Side of the Sky,Clara Reuben,98
-The Far Side of the Sky,Esther Adler,99
-The Far Side of the Sky,Hannah Adler,100
-The Far Side of the Sky,Jia-Li (Ko Jia-Li),101
-The Far Side of the Sky,Lotte Weczel,102
-The Far Side of the Sky,Sunny Mah,103
-The Library of Legends,Lian,104
-The Library of Legends,Miss Hu,105
-The Library of Legends,Mrs. Deng,106
-The Library of Legends,Sparrow,107
-The Mao Case,Jiao,108
-The Mao Case,Peiqin,109
-The Mao Case,Qian,110
-The Map of Lost Memories,Anne Howard,111
-The Map of Lost Memories,Irene Blum,112
-The Map of Lost Memories,Simone Merlin,113
-The Master of Rain,Irina Ignatiev,114
-The Master of Rain,Lena Orlov,115
-The Master of Rain,Natasha Medvedev,116
-The Master of Rain,Penelope Donaldson,117
-The Painter from Shanghai,Jinling,118
-The Painter from Shanghai,Pan Yuliang (born Xiuqing),119
-The Shanghai Moon,Alice Fairchild / Helga Ulrich,120
-The Shanghai Moon,Mei-lin,121
-The Shanghai Moon,Rosalie,122
+﻿"book","name","character_id"
+"A Case of Two Cities","An Jiayi","0"
+"A Case of Two Cities","Catherine Rohn","1"
+"A Case of Two Cities","Peiqin","2"
+"A Case of Two Cities","White Cloud","3"
+"A Loyal Character Dancer","Catherine Rohn","4"
+"A Loyal Character Dancer","Wen Liping","5"
+"All the Flowers in Shanghai","Ma","6"
+"All the Flowers in Shanghai","Madam Zhang","7"
+"All the Flowers in Shanghai","Ming","8"
+"All the Flowers in Shanghai","Sang Feng Feng (narrator)","9"
+"All the Flowers in Shanghai","Sister","10"
+"All the Flowers in Shanghai","Yan","11"
+"All the Flowers in Shanghai","Yu","12"
+"Becoming Madame Mao","Yunhe / Lan Ping / Nora","13"
+"Blue Hunger","Xu","14"
+"Blue Hunger","narrator, Ruben","15"
+"Death of a Red Heroine","Guan Hongying","16"
+"Death of a Red Heroine","Peiqin","17"
+"Death of a Red Heroine","Wang Feng","18"
+"Don't Cry Tai Lake","Mrs. Liu","19"
+"Don't Cry Tai Lake","Peiqin","20"
+"Dragon Springs Road","Anna Shea","21"
+"Dragon Springs Road","Fox","22"
+"Dragon Springs Road","Grandmother Yang","23"
+"Dragon Springs Road","Leah","24"
+"Dragon Springs Road","Miss Morris","25"
+"Dragon Springs Road","Mrs. Hao","26"
+"Dragon Springs Road","Ping Mei","27"
+"Dragon Springs Road","Yang Anjuin","28"
+"Dragon Springs Road","Zhu Jialing (narrator)","29"
+"Dreams of Joy","Auntie Hu","30"
+"Dreams of Joy","Joy Louie (narrator)","31"
+"Dreams of Joy","May","32"
+"Dreams of Joy","Pearl Chin (narrator)","33"
+"Empire of the Sun","Mrs. Ballard","34"
+"Empire of the Sun","Mrs. Vincent","35"
+"Enigma of China","Lianping","36"
+"Enigma of China","Peiqin","37"
+"Five Star Billionaire","Leong Yinghui","38"
+"Five Star Billionaire","Phoebe Chen Aiping","39"
+"Five Star Billionaire","Yanyan","40"
+"Five Star Billionaire","Zhou X","41"
+"Half a Lifelong Romance","Ah Bao","42"
+"Half a Lifelong Romance","Granny","43"
+"Half a Lifelong Romance","Gu Manlu","44"
+"Half a Lifelong Romance","Gu Manzhen","45"
+"Half a Lifelong Romance","Mrs. Gu","46"
+"Half a Lifelong Romance","Mrs. Hsu","47"
+"Half a Lifelong Romance","Mrs. Shen","48"
+"Half a Lifelong Romance","Shi Tsuizhi","49"
+"Jack of Spies","Caitlin Hanley","50"
+"My Favourite Wife","Alice Greene","51"
+"My Favourite Wife","Becca Holden","52"
+"My Favourite Wife","Holly Holden","53"
+"My Favourite Wife","JinJin Li","54"
+"My Favourite Wife","Nancy Deng","55"
+"My Favourite Wife","Rosalita","56"
+"My Favourite Wife","Tess Devlin","57"
+"Night in Shanghai","Anya Petrova","58"
+"Night in Shanghai","Song Yuhua","59"
+"Peach Blossom Pavilion","Aunty Ah Ping","60"
+"Peach Blossom Pavilion","Fang Rong","61"
+"Peach Blossom Pavilion","Mother","62"
+"Peach Blossom Pavilion","Pearl","63"
+"Peach Blossom Pavilion","Spring Moon","64"
+"Peach Blossom Pavilion","Xiang Xiang (narrator)","65"
+"Rabbit Moon","Claire Litvak","66"
+"Rabbit Moon","Grace Litvak (narrator)","67"
+"Rabbit Moon","Lindsey Litvak","68"
+"Rabbit Moon","Mei","69"
+"Red Mandarin Dress","Jasmine / Tian Mo","70"
+"Red Mandarin Dress","Mei","71"
+"Red Mandarin Dress","Peiqin","72"
+"Red Mandarin Dress","White Cloud","73"
+"Shanghai","Florence Burke","74"
+"Shanghai","Irina","75"
+"Shanghai","Leah Auerbach","76"
+"Shanghai Girls","Betsy Howell","77"
+"Shanghai Girls","Mama Chin (Madame Chin)","78"
+"Shanghai Girls","May Chin","79"
+"Shanghai Girls","Pearl Chin (narrator)","80"
+"Shanghai Immortal","Lady Gi (Gigi)","81"
+"Shanghai Immortal","Lady Jing (Jing, Hu Xian Jing，narrator)","82"
+"Shanghai Redemption","Peiqin","83"
+"Shanghai Redemption","Qian","84"
+"Shanghai Redemption","White Cloud (Bai)","85"
+"Shanghailanders","Doroteia ""Teia""","86"
+"Shanghailanders","Eko Yang","87"
+"Shanghailanders","Kiko Yang","88"
+"Shanghailanders","Yoko Yang","89"
+"Shanghailanders","Yumi Yang","90"
+"Song of the Exile","Sunny","91"
+"Sour Heart","Mande (narrator)","92"
+"The Binding Chair","Agnes","93"
+"The Binding Chair","Alice Benjamin","94"
+"The Binding Chair","Dolly Benjamin (nee Cohen)","95"
+"The Binding Chair","Eleanor Clusburtson","96"
+"The Binding Chair","May (Chao-tsing / May-li Cohen)","97"
+"The Distant Land of My Father","Anna Schoene (Anna / Anna Shoen Bradley)","98"
+"The Distant Land of My Father","Eve","99"
+"The Far Side of the Sky","Clara Reuben","100"
+"The Far Side of the Sky","Esther Adler","101"
+"The Far Side of the Sky","Hannah Adler","102"
+"The Far Side of the Sky","Jia-Li (Ko Jia-Li)","103"
+"The Far Side of the Sky","Lotte Weczel","104"
+"The Far Side of the Sky","Sunny Mah","105"
+"The Library of Legends","Lian","106"
+"The Library of Legends","Miss Hu","107"
+"The Library of Legends","Mrs. Deng","108"
+"The Library of Legends","Sparrow","109"
+"The Mao Case","Jiao","110"
+"The Mao Case","Peiqin","111"
+"The Mao Case","Qian","112"
+"The Map of Lost Memories","Anne Howard","113"
+"The Map of Lost Memories","Irene Blum","114"
+"The Map of Lost Memories","Simone Merlin","115"
+"The Master of Rain","Irina Ignatiev","116"
+"The Master of Rain","Lena Orlov","117"
+"The Master of Rain","Natasha Medvedev","118"
+"The Master of Rain","Penelope Donaldson","119"
+"The Painter from Shanghai","Jinling","120"
+"The Painter from Shanghai","Pan Yuliang (born Xiuqing)","121"
+"The Risk Agent","Amy Xue","122"
+"The Risk Agent","Grace Chu","123"
+"The Shanghai Factor","Mei","124"
+"The Shanghai Moon","Alice Fairchild / Helga Ulrich","125"
+"The Shanghai Moon","Mei-lin","126"
+"The Shanghai Moon","Rosalie","127"
+"The Song of the Jade Lily","Alexandra Laird","128"
+"The Song of the Jade Lily","Delma","129"
+"The Song of the Jade Lily","Eva Schwartz","130"
+"The Song of the Jade Lily","Li Ho","131"
+"The Song of the Jade Lily","Mei","132"
+"The Song of the Jade Lily","Mutti","133"
+"The Song of the Jade Lily","Nina","134"
+"The Song of the Jade Lily","Romy","135"
+"The Valley of Amazement","Flora Ivory","136"
+"The Valley of Amazement","Madam Li","137"
+"The Valley of Amazement","Magic Gourd (Golden Dove)","138"
+"The Valley of Amazement","Misty Cloud","139"
+"The Valley of Amazement","Mother Ma","140"
+"The Valley of Amazement","Pomelo (Luscious Peach)","141"
+"The Valley of Amazement","Violet Minturn","142"
+"These Violent Delights","Alisa Montagova","143"
+"These Violent Delights","Juliette Cai","144"
+"These Violent Delights","Kathleen Lang (Celia Lang)","145"
+"These Violent Delights","Madame","146"
+"These Violent Delights","Rosalind Lang","147"
+"What We Were Promised","Karen Zhen","148"
+"What We Were Promised","Rose","149"
+"What We Were Promised","Sunny (Tong Sunny)","150"
+"What We Were Promised","Taitai","151"
+"When Red Is Black","Peiqin","152"
