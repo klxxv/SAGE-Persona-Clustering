@@ -13,6 +13,8 @@ def run_grid_search():
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=8192, help="Batch size")
     parser.add_argument("--subset", type=int, default=None, help="Subset of characters (optional)")
+    parser.add_argument("--data_file", type=str, default=None, help="Path to main all_words.csv")
+    parser.add_argument("--word_csv", type=str, default=None, help="Path to word2vec_clusters.csv")
     
     args = parser.parse_args()
 
@@ -24,10 +26,7 @@ def run_grid_search():
     print(f">>> Params: iters={args.iters}, l1={args.l1}, lr={args.lr}")
     print("="*60)
 
-    # 记录总起始时间
     total_start_time = time.time()
-    
-    # 获取当前 Python 解释器路径，确保在相同的 conda 环境中运行
     python_exe = sys.executable
     
     for p in persona_range:
@@ -35,8 +34,6 @@ def run_grid_search():
         print(f"\n\n[EXPERIMENT START] n_personas = {p}")
         print("-" * 40)
         
-        # 构建运行命令
-        # 我们调用已经封装好的 run_cvae_full.py
         cmd = [
             python_exe, "experiments/cvae-flat/run_cvae_full.py",
             "--n_personas", str(p),
@@ -46,18 +43,15 @@ def run_grid_search():
             "--batch_size", str(args.batch_size)
         ]
         
-        if args.subset:
-            cmd.extend(["--subset", str(args.subset)])
+        if args.subset: cmd.extend(["--subset", str(args.subset)])
+        if args.data_file: cmd.extend(["--data_file", args.data_file])
+        if args.word_csv: cmd.extend(["--word_csv", args.word_csv])
 
-        # 设置 PYTHONPATH 确保模块导入正确
         env = os.environ.copy()
         env["PYTHONPATH"] = "."
         
         try:
-            # 串行运行，等待进程结束
-            # 使用 subprocess.run 确保每个进程结束后内存被释放
             subprocess.run(cmd, env=env, check=True)
-            
             elapsed = time.time() - run_start_time
             print("-" * 40)
             print(f"[EXPERIMENT SUCCESS] n_personas = {p} | Time: {elapsed:.2f}s")
@@ -70,8 +64,7 @@ def run_grid_search():
 
     total_elapsed = time.time() - total_start_time
     print("\n" + "="*60)
-    print(f">>> GRID SEARCH COMPLETED")
-    print(f">>> Total Time: {total_elapsed/3600:.2f} hours")
+    print(f">>> GRID SEARCH COMPLETED | Total Time: {total_elapsed/3600:.2f} hours")
     print("="*60)
 
 if __name__ == "__main__":
