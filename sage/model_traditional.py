@@ -349,7 +349,7 @@ class LiteraryPersonaSAGE:
         df['cluster_id'] = df['cluster_id'].astype(int)
         
         # 过滤低频角色
-        df["char_key"] = df["book"] + "_" + df["char_id"].astype(str)
+        df["char_key"] = df["book"].astype(str) + "_" + df["char_id"].astype(str)
         char_totals = df.groupby("char_key")["count"].sum()
         valid_keys = char_totals[char_totals >= self.min_mentions].index
         df = df[df["char_key"].isin(valid_keys)].copy()

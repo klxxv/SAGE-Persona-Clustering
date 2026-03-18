@@ -235,7 +235,7 @@ if __name__ == "__main__":
     parser.add_argument('--output_json', type=str, default="grid_search_results.json")
     parser.add_argument('--n_personas_list', type=int, nargs='+', default=[4, 8, 12, 16])
     parser.add_argument('--em_iters_list', type=int, nargs='+', default=[50, 100, 150, 200])
-    parser.add_argument('--l1_lambda', type=float, default=1e-6)
+    parser.add_argument('--l1_lambda', type=float, default=1e-4)
     
     args = parser.parse_args()
     run_optimized_grid_search(args)
