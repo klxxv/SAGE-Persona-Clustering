@@ -160,11 +160,28 @@ class AdvancedLiterarySAGE:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device} | Mode: {self.mode}")
 
-    def load_data(self, data_file, word_csv_file):
+    def load_data(self, data_file, word_csv_file, use_clusters=False):
+        """
+        data_file: Main CSV with word counts.
+        word_csv_file: Vocab or Cluster CSV.
+        use_clusters: If True, maps words to the 'cluster' column in word_csv_file.
+        """
         df_words = pd.read_csv(word_csv_file)
-        self.vocab = df_words['word'].tolist()
-        self.word_map = {w: i for i, w in enumerate(self.vocab)}
-        self.V = len(self.vocab)
+        
+        if use_clusters and 'cluster' in df_words.columns:
+            # Map each word to its cluster ID
+            self.word_to_cluster = dict(zip(df_words['word'], df_words['cluster']))
+            self.vocab = sorted(df_words['cluster'].unique().tolist())
+            self.word_map = {c: i for i, c in enumerate(self.vocab)}
+            self.V = len(self.vocab)
+            print(f">>> Mapping {len(df_words)} words to {self.V} clusters.")
+        else:
+            # Standard word-level vocabulary
+            self.vocab = df_words['word'].tolist()
+            self.word_map = {w: i for i, w in enumerate(self.vocab)}
+            self.V = len(self.vocab)
+            self.word_to_cluster = None
+            print(f">>> Using raw vocabulary with {self.V} words.")
 
         df = pd.read_csv(data_file)
         roles = ['agent', 'patient', 'possessive', 'predicative']
@@ -172,8 +189,13 @@ class AdvancedLiterarySAGE:
         self.r_map = {r: i for i, r in enumerate(roles)}
         self.R = len(roles)
 
-        df = df[df['word'].isin(self.word_map)].copy()
-        df['w_idx'] = df['word'].map(self.word_map)
+        if self.word_to_cluster:
+            # Map word in data to its cluster index
+            df = df[df['word'].isin(self.word_to_cluster)].copy()
+            df['w_idx'] = df['word'].map(self.word_to_cluster).map(self.word_map)
+        else:
+            df = df[df['word'].isin(self.word_map)].copy()
+            df['w_idx'] = df['word'].map(self.word_map)
         
         # Always create char_key for consistency in filtering/subsetting
         if 'book' in df.columns and 'char_id' in df.columns:

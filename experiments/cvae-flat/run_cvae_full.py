@@ -29,49 +29,32 @@ def check_cuda_environment():
         print("="*50 + "\n")
         return False
 
-def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, lr=1e-3, l1_lambda=1e-6, resume_path=None, data_file=None, word_csv=None):
+def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, lr=1e-3, l1_lambda=1e-6, 
+                  resume_path=None, data_file=None, word_csv=None, use_clusters=False):
     # 1. Check Environment
     has_gpu = check_cuda_environment()
     
-    # 2. Setup paths with fallback and validation
-    if data_file is None or word_csv is None:
-        # Default candidates
-        candidates = [
-            ("fullset_data/all_words.csv", "fullset_data/word2vec_clusters.csv"),
-            ("data/processed/all_words.csv", "data/processed/word2vec_clusters.csv"),
-            ("data/processed/female_words_with_ids.csv", "data/processed/female_vocab_map.csv")
-        ]
-        
-        found = False
-        for d, w in candidates:
-            if os.path.exists(d) and os.path.exists(w):
-                data_file, word_csv = d, w
-                found = True
-                break
-        
-        if not found:
-            print("Error: Required data files not found in default locations:")
-            for d, w in candidates:
-                print(f"  - Tried: {d} AND {w}")
-            print("\nPlease specify paths manually using --data_file and --word_csv")
-            return
-    else:
-        if not os.path.exists(data_file) or not os.path.exists(word_csv):
-            print(f"Error: Manually specified files not found:")
-            print(f"  - data_file: {data_file} ({'Exists' if os.path.exists(data_file) else 'NOT FOUND'})")
-            print(f"  - word_csv: {word_csv} ({'Exists' if os.path.exists(word_csv) else 'NOT FOUND'})")
-            return
+    # 2. Setup paths
+    # For DL (CVAE), we prefer the raw vocab map (5076 words)
+    if word_csv is None:
+        word_csv = "data/processed/female_vocab_map.csv"
+    
+    if data_file is None:
+        data_file = "fullset_data/all_words.csv"
+        if not os.path.exists(data_file):
+            data_file = "data/processed/all_words.csv"
 
-    print(f">>> Using Data: {data_file}")
-    print(f">>> Using Vocab: {word_csv}")
+    if not os.path.exists(word_csv) or not os.path.exists(data_file):
+        print(f"Error: Data files not found. \n  Data: {data_file}\n  Vocab: {word_csv}")
+        return
 
     # 3. Initialize Trainer
+    print(f">>> Mode: {'CLUSTER-based' if use_clusters else 'WORD-based'}")
     print(f">>> Initializing CVAE-SAGE: P={n_personas}, iters={iters}, batch_size={batch_size}, lr={lr}, l1={l1_lambda}")
     trainer = AdvancedLiterarySAGE(n_personas=n_personas, mode='cvae_flat', iters=iters, l1_lambda=l1_lambda)
     
-    # 4. Load & Global Mapping
-    print(">>> Loading dataset and performing global ID mapping...")
-    df_full = trainer.load_data(data_file, word_csv)
+    # 4. Load Data (Using the new flexible load_data)
+    df_full = trainer.load_data(data_file, word_csv, use_clusters=use_clusters)
     
     if subset_chars is not None:
         unique_chars = df_full['char_key'].unique()
@@ -79,6 +62,7 @@ def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, 
         df_full = df_full[df_full['char_key'].isin(subset_keys)].copy()
         print(f"    Subsetting to first {subset_chars} characters.")
 
+    # Global Mapping
     authors = sorted(df_full["author"].unique())
     trainer.m_map = {a: i for i, a in enumerate(authors)}
     trainer.M = len(trainer.m_map)
@@ -100,8 +84,6 @@ def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, 
     train_df = df_full[df_full['char_key'].isin(train_keys)].copy()
     test_df = df_full[df_full['char_key'].isin(test_keys)].copy()
     
-    print(f"    Train: {len(train_keys)} characters | Test: {len(test_keys)} characters")
-
     # 6. Fit model
     checkpoint_dir = f'checkpoints/cvae_P{n_personas}_L{l1_lambda}'
     print(f"\n>>> Starting Training (Checkpoints: {checkpoint_dir})...")
@@ -115,23 +97,18 @@ def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, 
     model_name = f'cvae_flat_P{n_personas}_iters{iters}_l1{l1_lambda}.pt'
     model_path = os.path.join('data/results', model_name)
     torch.save(trainer.model.state_dict(), model_path)
-    print(f">>> Final model saved to {model_path}")
 
     # 7. Evaluate
     print("\n>>> Evaluating Metrics...")
     latent_s_score, labels = calculate_latent_silhouette(trainer.model, train_df_mapped, trainer.device)
-    
     test_df_mapped = trainer.prepare_df(test_df)
-    if len(test_df_mapped) > 0:
-        perp = calculate_flat_perplexity(trainer.model, test_df_mapped, trainer.device)
-    else:
-        perp = float('nan')
+    perp = calculate_flat_perplexity(trainer.model, test_df_mapped, trainer.device) if len(test_df_mapped) > 0 else float('nan')
     
     print(f"    [Latent Space] Silhouette Score: {latent_s_score:.4f}")
     print(f"    [Test Set] Perplexity          : {perp:.4f}")
 
     # 8. Feature Keywords
-    print("\n>>> Extracting Top Words for learned Personas...")
+    print("\n>>> Extracting Top Words/Clusters...")
     vocab = trainer.vocab
     eta_persona = trainer.model.decoder.eta_persona.detach().cpu().numpy()
     role_names = {0: 'Agent', 1: 'Patient', 2: 'Possessive', 3: 'Predicative'}
@@ -140,20 +117,17 @@ def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, 
     unique_personas = np.unique(labels)
     for p in range(n_personas):
         assigned_count = (labels == p).sum() if p in unique_personas else 0
-        print(f"\n  Persona {p} (Assigned to {assigned_count} characters):")
         for r_idx, r_name in role_names.items():
             if r_idx < trainer.R:
                 weights = eta_persona[p, r_idx, :]
                 top_indices = np.argsort(weights)[-10:][::-1]
-                top_words = [vocab[i] for i in top_indices if weights[i] > 0]
-                for word in top_words:
-                    records.append({'persona': p, 'role': r_name, 'word': word, 'assigned_chars': assigned_count})
-                if top_words:
-                    print(f"    {r_name}: {', '.join(top_words)}")
-
+                top_tokens = [str(vocab[i]) for i in top_indices if weights[i] > 0]
+                for token in top_tokens:
+                    records.append({'persona': p, 'role': r_name, 'token': token, 'assigned_chars': assigned_count})
+    
     keywords_path = f'data/results/keywords_P{n_personas}_l1{l1_lambda}.csv'
     pd.DataFrame(records).to_csv(keywords_path, index=False)
-    print(f"\n>>> Keywords saved to {keywords_path}")
+    print(f">>> Keywords saved to {keywords_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Full CVAE-SAGE for Production")
@@ -162,12 +136,13 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8192, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--l1", type=float, default=1e-6, help="L1 penalty lambda")
-    parser.add_argument("--subset", type=int, default=None, help="Subset of characters (for testing)")
-    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--subset", type=int, default=None, help="Subset of characters")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint")
     parser.add_argument("--data_file", type=str, default=None, help="Path to main all_words.csv")
-    parser.add_argument("--word_csv", type=str, default=None, help="Path to word2vec_clusters.csv")
+    parser.add_argument("--word_csv", type=str, default=None, help="Path to vocab or cluster csv")
+    parser.add_argument("--use_clusters", action="store_true", help="If set, maps words to clusters")
     
     args = parser.parse_args()
     run_full_cvae(n_personas=args.n_personas, iters=args.iters, batch_size=args.batch_size, 
                   subset_chars=args.subset, lr=args.lr, l1_lambda=args.l1, resume_path=args.resume,
-                  data_file=args.data_file, word_csv=args.word_csv)
+                  data_file=args.data_file, word_csv=args.word_csv, use_clusters=args.use_clusters)
