@@ -381,7 +381,7 @@ class LiteraryPersonaSAGE:
         present_char_indices = sorted(df['c_idx'].unique())
         self.C = max(present_char_indices) + 1 if present_char_indices else 0
         
-        temp_info = df.groupby("c_idx")[["author", "book", "m_idx"]].first().reindex(range(self.C)).fillna(method='ffill').fillna(method='bfill')
+        temp_info = df.groupby("c_idx")[["author", "book", "m_idx"]].first().reindex(range(self.C)).ffill().bfill()
         self.char_info_df = temp_info
         char_to_book = temp_info['book'].values
         unique_books = df['book'].unique()
