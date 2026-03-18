@@ -40,6 +40,7 @@ data/results/*.pt
 data/results/*.csv
 data/results/*.json
 !data/results/refined_keywords/
+!data/results/all_persona_keywords/
 fullset_data/
 original_data/
 original_text/
