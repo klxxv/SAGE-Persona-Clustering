@@ -32,6 +32,38 @@ def calculate_mmd_distance_matrix(P, Q, K):
 # 2. 多维度轮廓系数计算函数
 # ==========================================
 
+def calculate_silhouette(features, labels, metric='cosine'):
+    """
+    Standard silhouette score.
+    """
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2:
+        return 0.0
+    return silhouette_score(features, labels, metric=metric)
+
+def calculate_latent_silhouette(model, df, device):
+    """
+    Calculate silhouette score in the latent space of the VAE.
+    """
+    model.eval()
+    with torch.no_grad():
+        # Get character features
+        char_word_counts = df.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
+        C = df['c_idx'].max() + 1
+        V = model.decoder.V
+        char_feats = np.zeros((C, V), dtype=np.float32)
+        char_feats[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
+        char_feats_tensor = torch.tensor(char_feats, dtype=torch.float32).to(device)
+        char_feats_tensor = F.normalize(char_feats_tensor, p=2, dim=1)
+        
+        # Encode to get latent persona logits
+        persona_logits = model.encoder(char_feats_tensor)
+        persona_probs = F.softmax(persona_logits, dim=-1).cpu().numpy()
+        labels = np.argmax(persona_probs, axis=1)
+        
+        score = calculate_silhouette(persona_probs, labels)
+        return score, labels
+
 def calculate_silhouette_custom(features, labels, metric='cosine'):
     """
     通用轮廓系数计算
