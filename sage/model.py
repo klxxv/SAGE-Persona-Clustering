@@ -194,7 +194,6 @@ class AdvancedLiterarySAGE:
     def fit(self, df, batch_size=8192, checkpoint_dir='data/results/checkpoints', 
             author_map_file=None, char_map_file=None, lr=1e-3, resume_path=None):
         import os
-        # Ensure absolute path for Windows robustness
         checkpoint_dir = os.path.abspath(checkpoint_dir)
         os.makedirs(checkpoint_dir, exist_ok=True)
         
@@ -207,6 +206,10 @@ class AdvancedLiterarySAGE:
             self.char_map = {ck: i for i, ck in enumerate(char_keys)}
             self.C = len(self.char_map)
         df = self.prepare_df(df)
+
+        # Save metadata info for post-processing
+        temp_info = df.groupby("c_idx")[["author", "book", "m_idx"]].first().reindex(range(self.C)).ffill().bfill()
+        self.char_info_df = temp_info
 
         char_word_counts = df.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
         char_feats_np = np.zeros((self.C, self.V))
@@ -238,8 +241,8 @@ class AdvancedLiterarySAGE:
 
         n_samples = len(df)
         print(f">>> Training {self.mode} with {n_samples} samples...")
-        pbar = tqdm(range(start_iter, self.iters), ascii=True) # Use ASCII for Windows console
-        save_interval = max(1, self.iters // 10)
+        pbar = tqdm(range(start_iter, self.iters), ascii=True)
+        best_recon = float('inf')
         
         for it in pbar:
             self.model.train()
@@ -262,17 +265,17 @@ class AdvancedLiterarySAGE:
                 batch_sum = b_cnt.sum().item()
                 total_recon += recon_loss.item() * batch_sum
                 n_tok += batch_sum
+            
             avg_recon = total_recon / n_tok
             pers_std = self.model.decoder.eta_persona.std().item()
             pbar.set_postfix({"Recon": f"{avg_recon:.4f}", "P_Std": f"{pers_std:.5f}"})
             
-            if (it + 1) % save_interval == 0:
-                os.makedirs(checkpoint_dir, exist_ok=True) # Defensive re-check
-                ckpt_file = os.path.join(checkpoint_dir, f'model_iter_{it+1}.pt')
-                try:
-                    torch.save(self.model.state_dict(), ckpt_file)
-                except Exception as e:
-                    print(f"Warning: Failed to save checkpoint at {ckpt_file}: {e}")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            latest_file = os.path.join(checkpoint_dir, 'latest_model.pt')
+            torch.save(self.model.state_dict(), latest_file)
+            if avg_recon < best_recon:
+                best_recon = avg_recon
+                torch.save(self.model.state_dict(), os.path.join(checkpoint_dir, 'best_model.pt'))
                     
         self.model.eval()
         with torch.no_grad():
