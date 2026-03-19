@@ -31,15 +31,15 @@ def main():
     python_exe = sys.executable
 
     # 1. CVAE Grid Search
-    cvae_cmd = [
-        python_exe, "experiments/cvae-flat/grid_search_cvae.py",
-        "--start_p", str(args.start_p),
-        "--end_p", str(args.end_p),
-        "--iters", str(args.iters),
-        "--l1", str(args.l1)
-    ]
-    if args.subset: cvae_cmd.extend(["--subset", str(args.subset)])
-    run_cmd(cvae_cmd, "CVAE-Flat Word-based Grid Search")
+    # cvae_cmd = [
+    #     python_exe, "experiments/cvae-flat/grid_search_cvae.py",
+    #     "--start_p", str(args.start_p),
+    #     "--end_p", str(args.end_p),
+    #     "--iters", str(args.iters),
+    #     "--l1", str(args.l1)
+    # ]
+    # if args.subset: cvae_cmd.extend(["--subset", str(args.subset)])
+    # run_cmd(cvae_cmd, "CVAE-Flat Word-based Grid Search")
 
     # 2. Traditional SAGE Grid Searches (4 Cluster Types)
     cluster_types = [
