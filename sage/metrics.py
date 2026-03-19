@@ -3,40 +3,62 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import silhouette_score
 import torch.nn.functional as F
-from scipy.spatial.distance import pdist, squareform
 
 # ==========================================
-# 1. 核心 MMD 距离计算 (推土机距离的高效近似)
-# ==========================================
-def calculate_mmd_distance_matrix(P, Q, K):
-    if Q is None: Q = P
-    PK = torch.matmul(P, K)
-    pKp = torch.sum(PK * P, dim=1)
-    QK = torch.matmul(Q, K)
-    qKq = torch.sum(QK * Q, dim=1)
-    pKq = torch.matmul(PK, Q.t())
-    mmd_sq = pKp.unsqueeze(1) + qKq.unsqueeze(0) - 2 * pKq
-    return torch.sqrt(torch.clamp(mmd_sq, min=0.0))
-
-# ==========================================
-# 2. 多维度轮廓系数计算函数
+# 1. 核心轮廓系数计算工具
 # ==========================================
 
-def calculate_silhouette(features, labels, metric='cosine'):
-    """
-    Standard silhouette score. Returns -1.0 if only 1 cluster exists.
-    """
-    unique_labels = np.unique(labels)
-    if len(unique_labels) < 2:
+def compute_silhouette(features, labels, metric='cosine'):
+    """通用轮廓系数计算，处理单类别异常"""
+    if len(np.unique(labels)) < 2:
         return -1.0
     try:
         return silhouette_score(features, labels, metric=metric)
-    except:
+    except Exception as e:
         return 0.0
+
+# ==========================================
+# 2. 三大维度轮廓系数分析
+# ==========================================
+
+def calculate_all_silhouettes(raw_features, persona_probs, persona_effects):
+    """
+    计算三个维度的轮廓系数：
+    1. Raw Semantic: 原始语义空间 (基于原始输入特征)
+    2. Weighted Semantic: 分类加权语义空间 (基于模型学习到的预期 Persona 效应)
+    3. Latent Persona: Persona 概率空间 (基于编码器输出)
+    
+    Args:
+        raw_features: [C, V] 归一化后的原始特征 (词频或词簇频率)
+        persona_probs: [C, P] 每个角色属于每个 Persona 的概率
+        persona_effects: [P, V] 每个 Persona 的语义偏移向量 (如果是多 Role，需预先平均或选择)
+    """
+    labels = np.argmax(persona_probs, axis=1)
+    
+    # 1. Raw Semantic Silhouette
+    raw_s = compute_silhouette(raw_features, labels)
+    
+    # 2. Weighted Semantic Silhouette (Classification Weighted)
+    # X_weighted = Probs * Effects -> 得到每个角色“预期”的 Persona 语义表现
+    weighted_features = np.matmul(persona_probs, persona_effects)
+    weighted_s = compute_silhouette(weighted_features, labels)
+    
+    # 3. Latent Persona Silhouette
+    latent_s = compute_silhouette(persona_probs, labels)
+    
+    return {
+        "raw_semantic": raw_s,
+        "weighted_semantic": weighted_s,
+        "latent_persona": latent_s
+    }
+
+# ==========================================
+# 3. 后向兼容与专用辅助函数
+# ==========================================
 
 def calculate_latent_silhouette(model, df, device):
     """
-    Calculate silhouette score in the latent space of the VAE.
+    针对 CVAE 的快速计算 (Latent Space Only)
     """
     model.eval()
     with torch.no_grad():
@@ -52,23 +74,20 @@ def calculate_latent_silhouette(model, df, device):
         persona_probs = F.softmax(persona_logits, dim=-1).cpu().numpy()
         labels = np.argmax(persona_probs, axis=1)
         
-        score = calculate_silhouette(persona_probs, labels)
+        score = compute_silhouette(persona_probs, labels)
         return score, labels
 
 def calculate_distribution_silhouette(df, labels, V):
     """
-    Calculate silhouette score based on raw word distributions of characters.
-    Used for Traditional SAGE which has no latent space.
+    针对传统 SAGE 的快速计算 (Raw Space Only)
     """
     C = df['c_idx'].max() + 1
     char_word_counts = df.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
     char_dist = np.zeros((C, V), dtype=np.float32)
     char_dist[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
-    # Normalize to probabilities
     row_sums = char_dist.sum(axis=1, keepdims=True)
     char_dist = np.divide(char_dist, row_sums, out=np.zeros_like(char_dist), where=row_sums!=0)
-    
-    return calculate_silhouette(char_dist, labels)
+    return compute_silhouette(char_dist, labels)
 
 def calculate_flat_perplexity(model, df, device):
     """计算扁平解码器的困惑度"""
@@ -98,5 +117,4 @@ def calculate_flat_perplexity(model, df, device):
         
         word_log_probs = log_probs[torch.arange(len(batch_w)), batch_w]
         total_log_likelihood = torch.sum(word_log_probs * batch_count).item()
-        
         return np.exp(-total_log_likelihood / total_tokens)

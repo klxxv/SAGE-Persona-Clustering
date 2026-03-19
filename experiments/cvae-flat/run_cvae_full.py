@@ -6,15 +6,13 @@ import torch
 import torch.nn.functional as F
 import argparse
 from sage.model import AdvancedLiterarySAGE
-from sage.metrics import calculate_silhouette, calculate_latent_silhouette, calculate_flat_perplexity
+from sage.metrics import calculate_all_silhouettes
 
 def check_cuda_environment():
     if torch.cuda.is_available():
         print(f">>> CUDA is available: {torch.version.cuda}")
         return True
-    else:
-        print(">>> CUDA not available, using CPU.")
-        return False
+    return False
 
 def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, lr=1e-3, l1_lambda=1e-6, 
                   resume_path=None, data_file=None, word_csv=None, use_clusters=False):
@@ -29,11 +27,9 @@ def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, 
     
     if subset_chars is not None:
         unique_chars = df_full['char_key'].unique()
-        # Randomized subset for better representation
         np.random.seed(42)
         subset_keys = np.random.choice(unique_chars, size=min(subset_chars, len(unique_chars)), replace=False)
         df_full = df_full[df_full['char_key'].isin(subset_keys)].copy()
-        print(f"    Randomly subsetted to {len(subset_keys)} characters.")
 
     res_dir = os.path.abspath(f"data/results/cvae_results/P{n_personas}_L{l1_lambda}")
     ckpt_dir = os.path.abspath(f"checkpoints/cvae_P{n_personas}_L{l1_lambda}")
@@ -46,33 +42,53 @@ def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, 
     
     torch.save(trainer.model.state_dict(), os.path.join(res_dir, "final_model.pt"))
 
+    # 1. Export Assignments
     df_results = trainer.char_info_df.copy()
     df_results["persona"] = trainer.p_assignments
-    assign_path = os.path.join(res_dir, "char_assignments.csv")
-    df_results.to_csv(assign_path, index=False)
-    print(f">>> Assignments saved to {assign_path}")
+    df_results.to_csv(os.path.join(res_dir, "char_assignments.csv"), index=False)
 
-    print(">>> Evaluating Metrics...")
-    latent_s_score, labels = calculate_latent_silhouette(trainer.model, train_df_mapped, trainer.device)
-    print(f"    Silhouette Score: {latent_s_score:.4f}")
+    # 2. Comprehensive Silhouette Analysis
+    print(">>> Performing Multi-dimensional Silhouette Analysis...")
+    trainer.model.eval()
+    with torch.no_grad():
+        # Get raw features (normalized bow)
+        C = train_df_mapped['c_idx'].max() + 1
+        V = trainer.V
+        char_word_counts = train_df_mapped.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
+        raw_features = np.zeros((C, V), dtype=np.float32)
+        raw_features[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
+        row_sums = raw_features.sum(axis=1, keepdims=True)
+        raw_features = np.divide(raw_features, row_sums, out=np.zeros_like(raw_features), where=row_sums!=0)
+        
+        # Get persona probabilities
+        char_feats_tensor = torch.tensor(raw_features, dtype=torch.float32).to(trainer.device)
+        char_feats_tensor = F.normalize(char_feats_tensor, p=2, dim=1)
+        persona_probs = F.softmax(trainer.model.encoder(char_feats_tensor), dim=-1).cpu().numpy()
+        
+        # Get averaged persona effects [P, V]
+        # model.decoder.eta_persona is [P, R, V]
+        persona_effects = trainer.model.decoder.eta_persona.mean(dim=1).detach().cpu().numpy()
+        
+        scores = calculate_all_silhouettes(raw_features, persona_probs, persona_effects)
+        for k, v in scores.items():
+            print(f"    {k:20s}: {v:.4f}")
 
+    # 3. Extract Keywords
     vocab = trainer.vocab
-    eta_persona = trainer.model.decoder.eta_persona.detach().cpu().numpy()
     role_names = {0: 'Agent', 1: 'Patient', 2: 'Possessive', 3: 'Predicative'}
     records = []
+    eta_persona_np = trainer.model.decoder.eta_persona.detach().cpu().numpy()
     for p in range(n_personas):
         assigned_count = (trainer.p_assignments == p).sum()
         for r_idx, r_name in role_names.items():
             if r_idx < trainer.R:
-                weights = eta_persona[p, r_idx, :]
+                weights = eta_persona_np[p, r_idx, :]
                 top_indices = np.argsort(weights)[-15:][::-1]
                 for i in top_indices:
                     if weights[i] > 0:
                         records.append({'persona': p, 'role': r_name, 'word': vocab[i], 'weight': weights[i], 'chars': assigned_count})
-    
-    kw_path = os.path.join(res_dir, "keywords.csv")
-    pd.DataFrame(records).to_csv(kw_path, index=False)
-    print(f">>> Keywords saved to {kw_path}")
+    pd.DataFrame(records).to_csv(os.path.join(res_dir, "keywords.csv"), index=False)
+    print(f">>> Results saved to {res_dir}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
