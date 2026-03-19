@@ -36,22 +36,24 @@ bin/
 checkpoints/
 data/raw/
 data/processed/
-data/results/*.pt
-data/results/*.csv
-data/results/*.json
-!data/results/refined_keywords/
-!data/results/all_persona_keywords/
-!data/results/char_assignments/
+data/results/
 fullset_data/
 original_data/
 original_text/
 上海小说_Data/
-*.csv
 *.xlsx
 *.zip
 *.pt
 *.model
 *.h5
+
+# Cluster datasets: ignore full (vector) files, ignore legacy bert/w2v dirs
+data/sage_cluster_dataset/**/*_clusters_full.csv
+data/sage_cluster_dataset/bert_256/
+data/sage_cluster_dataset/bert_512/
+data/sage_cluster_dataset/w2v_256/
+data/sage_cluster_dataset/w2v_512/
+data/fullset_data/
 
 # Logs
 *.log
@@ -61,7 +63,14 @@ EXPERIMENT_LOG.md
 .DS_Store
 Thumbs.db
 
+# Debug / temp scripts
+debug_*.py
+mem.md
+plan.md
+debug.md
+
 # Project specific
 unused/
-postprocess/
-preprocess/
+# preprocess and postprocess scripts are tracked; only ignore data outputs
+preprocess/__pycache__/
+postprocess/__pycache__/
