@@ -23,8 +23,8 @@ def main():
     parser = argparse.ArgumentParser(description="Master Grid Search for SAGE Persona models")
     parser.add_argument("--start_p", type=int, default=5)
     parser.add_argument("--end_p", type=int, default=15)
-    parser.add_argument("--iters", type=int, default=500, help="Iters for CVAE and Trad SAGE")
-    parser.add_argument("--subset", type=int, default=None, help="Subset of characters for testing")
+    parser.add_argument("--iters", type=int, default=500)
+    parser.add_argument("--subset", type=int, default=None)
     parser.add_argument("--l1", type=float, default=1.0)
     
     args = parser.parse_args()
@@ -60,7 +60,8 @@ def main():
             "--end_p", str(args.end_p),
             "--iters", str(args.iters),
             "--l1", str(args.l1),
-            "--word_csv", cluster_path
+            "--word_csv", cluster_path,
+            "--label", label # PASS UNIQUE LABEL
         ]
         if args.subset: trad_cmd.extend(["--subset", str(args.subset)])
         run_cmd(trad_cmd, f"Traditional SAGE Grid Search ({label})")

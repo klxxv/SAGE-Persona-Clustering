@@ -13,12 +13,13 @@ def run_grid_search():
     parser.add_argument("--subset", type=int, default=None)
     parser.add_argument("--data_file", type=str, default=None)
     parser.add_argument("--word_csv", type=str, default=None)
+    parser.add_argument("--label", type=str, default="Traditional") # NEW
     
     args = parser.parse_args()
     persona_range = range(args.start_p, args.end_p + 1)
     
     print("="*60)
-    print(f">>> TRADITIONAL SAGE GRID SEARCH STARTED")
+    print(f">>> {args.label} GRID SEARCH STARTED")
     print(f">>> Range: Personas {args.start_p} to {args.end_p}")
     print("="*60)
 
@@ -27,14 +28,14 @@ def run_grid_search():
     
     for p in persona_range:
         run_start_time = time.time()
-        print(f"\n[EXPERIMENT START] n_personas = {p}")
+        print(f"\n[EXPERIMENT START] {args.label} | n_personas = {p}")
         
-        # Correct path to run_traditional_full.py within its directory
         cmd = [
             python_exe, "experiments/traditional-sage/run_traditional_full.py",
             "--n_personas", str(p),
             "--iters", str(args.iters),
-            "--l1", str(args.l1)
+            "--l1", str(args.l1),
+            "--label", args.label # PASS LABEL
         ]
         if args.subset: cmd.extend(["--subset", str(args.subset)])
         if args.data_file: cmd.extend(["--data_file", args.data_file])
@@ -45,12 +46,12 @@ def run_grid_search():
         
         try:
             subprocess.run(cmd, env=env, check=True)
-            print(f"[EXPERIMENT SUCCESS] n_personas = {p} | Time: {time.time() - run_start_time:.2f}s")
+            print(f"[EXPERIMENT SUCCESS] {args.label} | n_personas = {p} | Time: {time.time() - run_start_time:.2f}s")
         except subprocess.CalledProcessError as e:
-            print(f"[EXPERIMENT FAILED] n_personas = {p} | Error: {e}")
+            print(f"[EXPERIMENT FAILED] {args.label} | n_personas = {p} | Error: {e}")
 
     print("\n" + "="*60)
-    print(f">>> GRID SEARCH COMPLETED | Total Time: {(time.time() - total_start_time)/3600:.2f} hours")
+    print(f">>> {args.label} COMPLETED | Total Time: {(time.time() - total_start_time)/3600:.2f} hours")
     print("="*60)
 
 if __name__ == "__main__":
