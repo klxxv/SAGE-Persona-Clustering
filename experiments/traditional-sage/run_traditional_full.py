@@ -70,24 +70,13 @@ def run_traditional_full(n_personas=8, em_iters=100, l1_lambda=1.0, subset_chars
         row_sums = raw_features.sum(axis=1, keepdims=True)
         raw_features = np.divide(raw_features, row_sums, out=np.zeros_like(raw_features), where=row_sums!=0)
 
-        # B. Persona Probabilities (Softmax over ll_matrix)
-        # We need to re-calculate log-likelihood matrix for all characters
+        # B. Persona Probabilities (Actual soft probabilities from Gibbs/Likelihood)
+        # Using the saved posterior_probs from the model
+        persona_probs = model.posterior_probs
+        
+        # Calculate leaf-level eta_pers for each role: [P, R, V]
         V_total = len(model.vocab_clusters)
-        m_indices = torch.tensor(model.char_info_df['m_idx'].values, device=model.device)
-        r_indices = torch.arange(model.R, device=model.device)
-        ll_matrix = torch.zeros((model.C, model.P), device=model.device)
-        
-        # Project all word paths weights
-        w_all = torch.arange(V_total, device=model.device)
-        # Compute leaf-level eta_pers for each role: [P, R, V]
         leaf_effects = (model.model.eta_pers[:, :, model.word_paths] * model.word_signs).sum(dim=3) # [P, R, V]
-        
-        # Calculate likelihoods
-        # Simplified: Use the assignments from the final Gibbs state as proxy for posterior probs
-        # To get true soft probs, we'd need to average over many Gibbs samples.
-        # Here we use One-Hot of final assignments as a practical proxy.
-        persona_probs = np.zeros((model.C, model.P))
-        persona_probs[np.arange(model.C), model.p_assignments] = 1.0
         
         # C. Persona Leaf Effects [P, V] (Averaged across roles)
         persona_effects = leaf_effects.mean(dim=1).detach().cpu().numpy()

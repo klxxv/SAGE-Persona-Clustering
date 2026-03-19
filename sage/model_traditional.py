@@ -407,6 +407,9 @@ class LiteraryPersonaSAGE:
                 for book_id, local_assigns, local_counts in parallel_results:
                     self.book_persona_counts[book_id] = local_counts
                     for c, new_p in local_assigns.items(): self.p_assignments[c] = new_p
+        
+        # Store final soft probabilities for evaluation
+        self.posterior_probs = post_probs 
         return df
 
     def save_checkpoint(self, path, current_iter):
