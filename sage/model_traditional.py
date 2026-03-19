@@ -13,137 +13,204 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ==========================================
-# 1. 论文中原汁原味的 OWL-QN 优化器实现 (简化版正交投影拟牛顿法)
+# 1. OWL-QN 优化器 (Andrew & Gao, 2007) — 完整 L-BFGS Hessian 近似版
 # ==========================================
 class OWLQN(torch.optim.Optimizer):
     """
-    改进版 Orthant-Wise Limited-memory Quasi-Newton (OWL-QN) 近似实现
-    结合了伪梯度(Pseudo-gradient)、正交象限投影(Orthant Projection) 以及简单的回溯线搜索(Backtracking Line Search)
+    OWL-QN: Orthant-Wise Limited-memory Quasi-Newton (Andrew & Gao, 2007).
+
+    与原论文一致的完整实现：
+      - 用 L-BFGS 双循环递推近似 Hessian 逆矩阵，计算搜索方向
+      - 伪梯度 (Pseudo-gradient) 处理 L1 在零点不可导
+      - 将 L-BFGS 方向投影到伪梯度的正交象限
+      - Armijo 充分下降线搜索
+      - 仅当 y^T s > 0 时更新 L-BFGS 历史（保正定性）
+
+    参数:
+      history_size : L-BFGS 保留的历史对数 (论文默认 10)
+      max_ls_iters : 线搜索最大回溯次数
+      beta         : 线搜索步长缩减因子
+      c1           : Armijo 充分下降条件系数
     """
-    def __init__(self, params, lr=1.0, l1_lambda=1.0, c1=1e-4, beta=0.5):
-        if lr < 0.0:
-            raise ValueError(f"Invalid learning rate: {lr}")
-        defaults = dict(lr=lr, l1_lambda=l1_lambda, c1=c1, beta=beta)
-        super(OWLQN, self).__init__(params, defaults)
+    def __init__(self, params, lr=1.0, l1_lambda=1.0,
+                 history_size=10, max_ls_iters=20, beta=0.5, c1=1e-4):
+        defaults = dict(lr=lr, l1_lambda=l1_lambda)
+        super().__init__(params, defaults)
+        self.history_size = history_size
+        self.max_ls_iters = max_ls_iters
+        self.beta = beta
+        self.c1 = c1
+        # L-BFGS 全局历史（跨所有参数组，视为一个大的平坦向量）
+        self._s_hist   = []  # x_{k+1} - x_k
+        self._y_hist   = []  # ∇f(x_{k+1}) - ∇f(x_k)  (仅光滑部分梯度)
+        self._rho_hist = []  # 1 / (y^T s)
 
-    def _pseudo_gradient(self, w, g, l1_lambda):
-        """
-        计算次梯度/伪梯度 (Pseudo-gradient)
-        处理 L1 正则化在 0 点不可导的问题
-        """
-        if l1_lambda == 0.0:
-            return g # 对于没有正则化的参数组（如 eta_bg），直接返回原始梯度
+    def reset_history(self):
+        """E-Step 后 persona 分配改变，旧的 Hessian 近似失效，重置历史。"""
+        self._s_hist.clear()
+        self._y_hist.clear()
+        self._rho_hist.clear()
 
-        pg = torch.zeros_like(g)
-        
-        # w < 0 的象限
-        idx_neg = w < 0
-        pg[idx_neg] = g[idx_neg] - l1_lambda
-        
-        # w > 0 的象限
-        idx_pos = w > 0
-        pg[idx_pos] = g[idx_pos] + l1_lambda
-        
-        # w == 0 的象限
-        idx_zero = w == 0
-        g_zero = g[idx_zero]
-        pg_zero = torch.zeros_like(g_zero)
-        
-        # 只有当原始梯度大于 L1 惩罚时，才会在 0 点产生向左或向右的梯度
-        pg_zero[g_zero + l1_lambda < 0] = g_zero[g_zero + l1_lambda < 0] + l1_lambda
-        pg_zero[g_zero - l1_lambda > 0] = g_zero[g_zero - l1_lambda > 0] - l1_lambda
-        
-        pg[idx_zero] = pg_zero
-        return pg
+    # ------------------------------------------------------------------
+    # 内部工具：将所有参数/梯度展平为单一向量
+    # ------------------------------------------------------------------
+    def _flat_params(self):
+        return torch.cat([p.data.view(-1) for g in self.param_groups for p in g['params']])
 
-    def _project_to_orthant(self, x, x_old, pg):
-        """
-        将更新后的权重投影回原本的正交象限
-        防止跨越坐标轴改变符号，如果符号改变则强制截断为 0
-        """
-        # 定义目标象限：由当前变量所在的象限或伪梯度的反方向决定
+    def _flat_grads(self):
+        return torch.cat([
+            (p.grad.view(-1) if p.grad is not None else p.data.new_zeros(p.numel()))
+            for g in self.param_groups for p in g['params']
+        ])
+
+    def _set_params(self, flat):
+        offset = 0
+        for group in self.param_groups:
+            for p in group['params']:
+                n = p.numel()
+                p.data.copy_(flat[offset:offset + n].view_as(p))
+                offset += n
+
+    def _flat_pseudo_grad(self):
+        """逐参数组计算伪梯度，然后拼接成平坦向量。"""
+        vecs = []
+        for group in self.param_groups:
+            l1 = group['l1_lambda']
+            for p in group['params']:
+                g = p.grad.view(-1) if p.grad is not None else p.data.new_zeros(p.numel())
+                w = p.data.view(-1)
+                if l1 == 0.0:
+                    vecs.append(g)
+                    continue
+                pg = g.clone()
+                pg[w > 0] = g[w > 0] + l1
+                pg[w < 0] = g[w < 0] - l1
+                # w == 0：仅当 |g| > l1 时才产生非零伪梯度
+                m0 = (w == 0)
+                g0 = g[m0]
+                pg0 = g0.new_zeros(g0.shape)
+                pg0[g0 < -l1] = g0[g0 < -l1] + l1
+                pg0[g0 >  l1] = g0[g0 >  l1] - l1
+                pg[m0] = pg0
+                vecs.append(pg)
+        return torch.cat(vecs)
+
+    def _l1_penalty(self):
+        total = 0.0
+        for group in self.param_groups:
+            l1 = group['l1_lambda']
+            if l1 > 0:
+                for p in group['params']:
+                    total += l1 * p.data.abs().sum().item()
+        return total
+
+    # ------------------------------------------------------------------
+    # L-BFGS 双循环递推：d = -H^{-1} * pg
+    # ------------------------------------------------------------------
+    def _lbfgs_direction(self, pg):
+        q = pg.clone()
+        alphas = []
+        for s, y, rho in zip(reversed(self._s_hist),
+                              reversed(self._y_hist),
+                              reversed(self._rho_hist)):
+            a = rho * torch.dot(s, q)
+            alphas.append(a)
+            q.add_(y, alpha=-a.item())
+
+        # 初始 Hessian 近似：H_0 = γI，γ = (s^T y)/(y^T y)
+        if self._s_hist:
+            s_l, y_l = self._s_hist[-1], self._y_hist[-1]
+            gamma = (torch.dot(s_l, y_l) / torch.dot(y_l, y_l).clamp(min=1e-12)).clamp(1e-8, 1e8)
+            r = q * gamma
+        else:
+            r = q.clone()
+
+        for s, y, rho, a in zip(self._s_hist, self._y_hist,
+                                  self._rho_hist, reversed(alphas)):
+            b = rho * torch.dot(y, r)
+            r.add_(s, alpha=(a - b).item())
+
+        return -r  # 下降方向
+
+    # ------------------------------------------------------------------
+    # 正交象限投影
+    # ------------------------------------------------------------------
+    def _project_direction(self, d, pg):
+        """将 L-BFGS 方向投影到与 -pg 同号的象限（零出跨象限分量）。"""
+        d = d.clone()
+        d[(d * pg) > 0] = 0.0  # d_i 与 pg_i 同号 → 方向错误 → 置零
+        return d
+
+    def _project_params(self, x_new, x_old, pg):
+        """步进后将参数投影回 x_old 定义的正交象限，跨零点的分量截断为 0。"""
         orthant = torch.sign(x_old)
-        orthant[orthant == 0] = torch.sign(-pg[orthant == 0])
-        
-        # 将跨越象限的值截断为 0
-        x_projected = x.clone()
-        cross_mask = (torch.sign(x_projected) * orthant) < 0
-        x_projected[cross_mask] = 0.0
-        
-        return x_projected
+        orthant[x_old == 0] = -torch.sign(pg[x_old == 0])
+        x_new = x_new.clone()
+        x_new[(torch.sign(x_new) * orthant) < 0] = 0.0
+        return x_new
 
+    # ------------------------------------------------------------------
+    # 主更新步骤
+    # ------------------------------------------------------------------
     @torch.no_grad()
     def step(self, closure):
-        """
-        执行单步 OWL-QN 更新，包含闭包求值和线搜索
-        """
         if closure is None:
-            raise RuntimeError("OWL-QN requires a closure to evaluate loss for line search.")
-            
-        # 1. 计算初始 Loss 和梯度
+            raise RuntimeError("OWL-QN requires a closure.")
+
+        # 1. 计算当前点的 loss 和梯度
         with torch.enable_grad():
             loss = closure()
-            
-        initial_loss = loss.item()
 
-        # 保存当前参数和计算出的伪梯度
-        p_olds = []
-        pgs = []
-        
-        for group in self.param_groups:
-            l1_lambda = group['l1_lambda']
-            for p in group['params']:
-                if p.grad is None:
-                    p_olds.append(None)
-                    pgs.append(None)
-                    continue
-                    
-                p_olds.append(p.clone())
-                pg = self._pseudo_gradient(p, p.grad, l1_lambda)
-                pgs.append(pg)
+        x0 = self._flat_params()
+        g0 = self._flat_grads()          # 光滑部分梯度（用于更新 L-BFGS 历史）
+        pg = self._flat_pseudo_grad()    # 伪梯度（用于计算搜索方向）
+        h0 = loss.item() + self._l1_penalty()
 
-        # 2. 回溯线搜索 (Backtracking Line Search) 确保充分下降
-        idx = 0
-        for group in self.param_groups:
-            lr = group['lr']
-            beta = group['beta'] # 步长衰减率
-            l1_lambda = group['l1_lambda']
-            
-            for p in group['params']:
-                if p.grad is None:
-                    idx += 1
-                    continue
-                
-                p_old = p_olds[idx]
-                pg = pgs[idx]
-                
-                current_lr = lr
-                max_ls_iters = 10 # 最大线搜索次数
-                
-                for ls_iter in range(max_ls_iters):
-                    # 尝试走一步
-                    p.copy_(p_old)
-                    p.add_(pg, alpha=-current_lr)
-                    
-                    # 正交投影
-                    p.copy_(self._project_to_orthant(p, p_old, pg))
-                    
-                    # 计算尝试步之后的 loss
-                    with torch.enable_grad():
-                        new_loss = closure()
-                        
-                    # L1 正则化的目标值计算
-                    l1_penalty_old = l1_lambda * p_old.abs().sum()
-                    l1_penalty_new = l1_lambda * p.abs().sum()
-                    
-                    # 简单的充分下降条件检查 (Armijo rule 简化版)
-                    if new_loss.item() + l1_penalty_new <= initial_loss + l1_penalty_old:
-                        break # 找到了合适的步长
-                        
-                    # 否则衰减学习率
-                    current_lr *= beta
-                    
-                idx += 1
+        # 2. L-BFGS 方向 + 正交象限投影
+        d = self._lbfgs_direction(pg)
+        d = self._project_direction(d, pg)
+
+        # 如果方向不是下降方向（异常情况），退化为最速下降
+        pg_dot_d = torch.dot(pg, d).item()
+        if pg_dot_d >= 0:
+            d = -pg
+            pg_dot_d = torch.dot(pg, d).item()
+
+        # 3. Armijo 充分下降线搜索
+        lr = self.param_groups[0]['lr']
+        found = False
+        x1 = x0
+        for _ in range(self.max_ls_iters):
+            x1 = self._project_params(x0 + lr * d, x0, pg)
+            self._set_params(x1)
+            with torch.enable_grad():
+                new_loss = closure(backward=False)
+            h1 = new_loss.item() + self._l1_penalty()
+            if h1 <= h0 + self.c1 * lr * pg_dot_d:
+                found = True
+                break
+            lr *= self.beta
+
+        if not found:
+            self._set_params(x0)
+            return loss
+
+        # 4. 计算新点处的光滑梯度，更新 L-BFGS 历史
+        with torch.enable_grad():
+            closure(backward=True)
+        g1 = self._flat_grads()
+
+        s  = x1 - x0
+        y  = g1 - g0
+        sy = torch.dot(s, y).item()
+        if sy > 1e-10:  # 仅在曲率为正时更新（保证 Hessian 近似正定）
+            self._s_hist.append(s.clone())
+            self._y_hist.append(y.clone())
+            self._rho_hist.append(1.0 / sy)
+            if len(self._s_hist) > self.history_size:
+                self._s_hist.pop(0)
+                self._y_hist.pop(0)
+                self._rho_hist.pop(0)
 
         return loss
 
@@ -228,14 +295,14 @@ def slice_sample_alpha(alpha, persona_counts, num_docs, P, w=0.5, max_steps=100)
 # 4. 核心训练器
 # ==========================================
 class LiteraryPersonaSAGE:
-    def __init__(self, n_personas=8, init_alpha=1.0, l1_lambda=0.1, em_iters=50, min_mentions=10):
+    def __init__(self, n_personas=8, init_alpha=1.0, l1_lambda=0.01, em_iters=50, min_mentions=10):
         self.P = n_personas
         self.alpha = init_alpha
         self.l1_lambda = l1_lambda
         self.iters = em_iters
         self.min_mentions = min_mentions
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {self.device}")
+        print(f"Using device: {self.device} | L1 Lambda: {self.l1_lambda}")
 
     def _build_balanced_tree(self, df_words):
         """
@@ -419,14 +486,48 @@ class LiteraryPersonaSAGE:
         ms_count = torch.tensor(m_step_static['count'].values, dtype=torch.float32, device=self.device)
         total_tokens = ms_count.sum().item()
 
+        # loss 保持 /total_tokens 归一化（梯度量级 O(1)，OWL-QN lr=1.0 稳定）。
+        # 为了等价于论文的 unnorm_loss + lambda||eta||_1，将 l1_lambda 同比缩放：
+        #   argmin -sum/N + (lambda/N)||eta||_1  <=>  argmin -sum + lambda||eta||_1
+        effective_l1 = self.l1_lambda / total_tokens
+
         print(f"Authors (M): {self.M}, Roles (R): {self.R}, Chars (C): {self.C}")
+        print(f"total_tokens: {total_tokens:.0f}, effective_l1: {effective_l1:.2e} (= {self.l1_lambda} / {total_tokens:.0f})")
+
+        # ---------------------------------------------------------
+        # 阶段 0: 预训练 (Warm-up)
+        # 只训练 eta_bg 和 eta_meta，不开启 eta_pers。
+        # ---------------------------------------------------------
+        if not resume_state:
+            print(">>> Phase 0: Warming up Background and Meta effects (10 steps)...")
+            warmup_optimizer = OWLQN([
+                {'params': [self.model.eta_meta], 'l1_lambda': effective_l1},
+                {'params': [self.model.eta_bg], 'l1_lambda': 0.0}
+            ], lr=1.0)
+
+            # 在 Warm-up 期间，persona 索引固定为 0，但 eta_pers 保持 0 并不参与训练
+            ms_p_idx_dummy = torch.zeros_like(ms_c_idx)
+
+            def warmup_closure(backward=True):
+                warmup_optimizer.zero_grad()
+                node_paths = self.word_paths[ms_w_idx]
+                node_signs = self.word_signs[ms_w_idx]
+                word_log_probs = self.model(ms_m_idx, ms_p_idx_dummy, ms_r_idx, node_paths, node_signs)
+                loss = -torch.sum(word_log_probs * ms_count) / total_tokens
+                if backward:
+                    loss.backward()
+                return loss
+
+            for _ in tqdm(range(10), desc="Warm-up"):
+                warmup_optimizer.step(warmup_closure)
+            print("    Warm-up completed.")
 
         regularized_params = [self.model.eta_meta, self.model.eta_pers]
         unregularized_params = [self.model.eta_bg]
-        
+
         optimizer = OWLQN([
-            {'params': regularized_params, 'l1_lambda': self.l1_lambda},
-            {'params': unregularized_params, 'l1_lambda': 0.0} 
+            {'params': regularized_params, 'l1_lambda': effective_l1},
+            {'params': unregularized_params, 'l1_lambda': 0.0}
         ], lr=1.0)
 
         print(f">>> Starting Stochastic EM training ({start_iter} to {self.iters} rounds)...")
@@ -448,28 +549,29 @@ class LiteraryPersonaSAGE:
             if (it + 1) % 5 == 0:
                 self.alpha = slice_sample_alpha(self.alpha, self.book_persona_counts, len(unique_books), self.P)
 
-            # --- M-STEP (Optimized) ---
+            # --- M-STEP ---
             self.model.train()
-            
-            # 这里的 p_assignments 张量化
+
+            # E-Step 改变了 persona 分配 → 旧 Hessian 近似失效 → 重置 L-BFGS 历史
+            optimizer.reset_history()
+
             p_assignments_t = torch.from_numpy(self.p_assignments).to(self.device)
-            # 获取当前所有静态行对应的 p_idx
             ms_p_idx = p_assignments_t[ms_c_idx]
-            
-            def closure():
+
+            def closure(backward=True):
                 optimizer.zero_grad()
                 node_paths = self.word_paths[ms_w_idx]
                 node_signs = self.word_signs[ms_w_idx]
-                # 直接在 ms_idx 上计算概率
                 word_log_probs = self.model(ms_m_idx, ms_p_idx, ms_r_idx, node_paths, node_signs)
-                # 加权求和得到负对数似然
+                # 归一化保持梯度 O(1)，effective_l1 已同比缩放，等价于论文 unnorm + λ=1
                 loss = -torch.sum(word_log_probs * ms_count) / total_tokens
-                loss.backward()
+                if backward:
+                    loss.backward()
                 return loss
-            
+
             prev_loss = float('inf')
-            tolerance = 1e-4  # 稍微放宽收敛条件以加速
-            max_m_steps = 50  # 减少最大 M-Step 步数
+            tolerance = 1e-5  # 与论文一致
+            max_m_steps = 50
             
             m_step_pbar = tqdm(range(max_m_steps), desc=f"  It {it+1} M-Step", leave=False)
             for m_step in m_step_pbar:
@@ -607,7 +709,7 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--n_personas', type=int, default=8)
     parser.add_argument('--em_iters', type=int, default=50)
-    parser.add_argument('--l1_lambda', type=float, default=1e-6)
+    parser.add_argument('--l1_lambda', type=float, default=1.0)
     
     args = parser.parse_args()
 

@@ -10,14 +10,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ==========================================
-# 1. 哈夫曼树构建器 (Huffman Tree Builder)
+# 1. Huffman Tree Builder
 # ==========================================
 
 class HuffmanTreeBuilder:
     def __init__(self, word_counts):
-        """
-        word_counts: Dict[word_id, frequency]
-        """
         self.word_counts = word_counts
         self.V = len(word_counts)
         self.parent_map = {}
@@ -26,22 +23,18 @@ class HuffmanTreeBuilder:
 
     def build(self):
         print(f">>> Building Huffman Tree for {self.V} tokens...")
-        # 优先级队列：(频率, 节点ID)
         heap = [[count, i] for i, count in self.word_counts.items()]
         heapq.heapify(heap)
 
         while len(heap) > 1:
             count1, node1 = heapq.heappop(heap)
             count2, node2 = heapq.heappop(heap)
-            
             parent_node = self.next_node_id
             self.next_node_id += 1
-            
             self.parent_map[node1] = parent_node
-            self.sign_map[node1] = -1.0 # Left
+            self.sign_map[node1] = -1.0
             self.parent_map[node2] = parent_node
-            self.sign_map[node2] = 1.0  # Right
-            
+            self.sign_map[node2] = 1.0
             heapq.heappush(heap, [count1 + count2, parent_node])
 
         num_internal_nodes = self.next_node_id - self.V
@@ -63,73 +56,50 @@ class HuffmanTreeBuilder:
             p, s = paths[i]
             word_paths[i, :len(p)] = torch.tensor(p)
             word_signs[i, :len(s)] = torch.tensor(s)
-            
         return word_paths, word_signs, num_internal_nodes
 
 # ==========================================
-# 2. 现代扁平化解码器 (Flat Softmax Decoder)
+# 2. Flat Mixed Effects Decoder
 # ==========================================
 
 class FlatMixedEffectsDecoder(nn.Module):
-    """
-    扁平化解码器：Logits = E_bg + E_author[m] + E_persona[z]
-    直接对全量词表输出 Softmax，不使用树。
-    支持 Role Mask 以处理不同语法关系的词表差异。
-    """
-    def __init__(self, V, M, P, R, role_mask=None):
+    def __init__(self, V, M, P, R, role_mask=None, log_bg=None):
         super().__init__()
         self.V = V
-        # 背景偏置：[R, V]
         self.eta_bg = nn.Parameter(torch.zeros(R, V))
-        # 作者效应：[M, R, V]
+        if log_bg is not None:
+            self.eta_bg.data.copy_(log_bg.unsqueeze(0).expand(R, V))
+            self.eta_bg.requires_grad = False
+            
         self.eta_author = nn.Parameter(torch.zeros(M, R, V))
-        # 人格效应：[P, R, V]
         self.eta_persona = nn.Parameter(torch.zeros(P, R, V))
-        # 语法关系掩码：[R, V]
         self.register_buffer('role_mask', role_mask)
 
     def forward(self, m_idx, z_persona, r_idx):
-        """
-        z_persona: [batch, P] (Gumbel-Softmax output)
-        """
         batch_size = m_idx.shape[0]
-
-        # 1. 背景
-        bg = self.eta_bg[r_idx] # [batch, V]
-
-        # 2. 作者
-        # 使用 batch_indices 提取每个样本对应的作者
-        author_w = self.eta_author[m_idx, r_idx] # [batch, V]
-
-        # 3. 人格 (矩阵乘法解耦)
-        # self.eta_persona: [P, R, V] -> reshape [P, R*V]
+        bg = self.eta_bg[r_idx]
+        author_w = self.eta_author[m_idx, r_idx]
+        
         pers_flat = self.eta_persona.view(z_persona.shape[1], -1)
-        sampled_pers = torch.matmul(z_persona, pers_flat) # [batch, R*V]
-        sampled_pers = sampled_pers.view(batch_size, -1, self.V) # [batch, R, V]
-
-        # 提取对应 R 的 persona 向量
+        sampled_pers = torch.matmul(z_persona, pers_flat)
+        sampled_pers = sampled_pers.view(batch_size, -1, self.V)
+        
         batch_indices = torch.arange(batch_size, device=m_idx.device)
-        persona_w = sampled_pers[batch_indices, r_idx] # [batch, V]
-
+        persona_w = sampled_pers[batch_indices, r_idx]
+        
         logits = bg + author_w + persona_w
-
-        # 4. 应用 Role Mask
         if self.role_mask is not None:
-            # r_idx 是一个 batch 的索引，取对应的 mask
             current_mask = self.role_mask[r_idx]
-            # 将不属于该 role 的词设置为极小值，从而在 softmax 中概率接近 0
-            logits = logits.masked_fill(current_mask == 0, -1e9)
-
+            logits = logits.masked_fill(current_mask == 0, -100.0) 
         return F.log_softmax(logits, dim=-1)
 
 # ==========================================
-# 3. 核心 VAE 模型 (结合 Flat Decoder)
+# 3. SAGE_CVAE_Flat Model
 # ==========================================
 
 class SAGE_CVAE_Flat(nn.Module):
-    def __init__(self, input_dim, M, P, R, role_mask=None, hidden_dim=512):
+    def __init__(self, input_dim, M, P, R, role_mask=None, hidden_dim=512, log_bg=None):
         super().__init__()
-        # Encoder: BoW -> Persona Logits
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -137,8 +107,7 @@ class SAGE_CVAE_Flat(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, P)
         )
-        # Decoder: Mixed Effects Flat
-        self.decoder = FlatMixedEffectsDecoder(input_dim, M, P, R, role_mask=role_mask)
+        self.decoder = FlatMixedEffectsDecoder(input_dim, M, P, R, role_mask=role_mask, log_bg=log_bg)
         self.P = P
 
     def forward(self, char_feats, m_idx, r_idx, temp=1.0, hard=True):
@@ -148,40 +117,31 @@ class SAGE_CVAE_Flat(nn.Module):
         return log_probs, persona_logits, z_persona
 
 # ==========================================
-# 4. 统一训练器 (支持多种模式)
+# 4. AdvancedLiterarySAGE Trainer
 # ==========================================
 
 class AdvancedLiterarySAGE:
-    def __init__(self, n_personas=16, mode='cvae_flat', iters=100, l1_lambda=1e-5):
+    def __init__(self, n_personas=16, mode='cvae_flat', iters=100, l1_lambda=1.0):
         self.P = n_personas
-        self.mode = mode # 'cvae_flat' 或 'huffman_tree'
+        self.mode = mode
         self.iters = iters
         self.l1_lambda = l1_lambda
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.role_mask = None
         print(f"Using device: {self.device} | Mode: {self.mode}")
 
     def load_data(self, data_file, word_csv_file, use_clusters=False):
-        """
-        data_file: Main CSV with word counts.
-        word_csv_file: Vocab or Cluster CSV.
-        use_clusters: If True, maps words to the 'cluster' column in word_csv_file.
-        """
         df_words = pd.read_csv(word_csv_file)
-        
         if use_clusters and 'cluster' in df_words.columns:
-            # Map each word to its cluster ID
             self.word_to_cluster = dict(zip(df_words['word'], df_words['cluster']))
             self.vocab = sorted(df_words['cluster'].unique().tolist())
             self.word_map = {c: i for i, c in enumerate(self.vocab)}
             self.V = len(self.vocab)
-            print(f">>> Mapping {len(df_words)} words to {self.V} clusters.")
         else:
-            # Standard word-level vocabulary
             self.vocab = df_words['word'].tolist()
             self.word_map = {w: i for i, w in enumerate(self.vocab)}
             self.V = len(self.vocab)
             self.word_to_cluster = None
-            print(f">>> Using raw vocabulary with {self.V} words.")
 
         df = pd.read_csv(data_file)
         roles = ['agent', 'patient', 'possessive', 'predicative']
@@ -190,41 +150,41 @@ class AdvancedLiterarySAGE:
         self.R = len(roles)
 
         if self.word_to_cluster:
-            # Map word in data to its cluster index
             df = df[df['word'].isin(self.word_to_cluster)].copy()
             df['w_idx'] = df['word'].map(self.word_to_cluster).map(self.word_map)
         else:
             df = df[df['word'].isin(self.word_map)].copy()
             df['w_idx'] = df['word'].map(self.word_map)
         
-        # Always create char_key for consistency in filtering/subsetting
+        word_counts_all = df.groupby('w_idx')['count'].sum()
+        full_counts = np.zeros(self.V)
+        for idx, count in word_counts_all.items():
+            if idx < self.V: full_counts[int(idx)] = count
+        word_probs = (full_counts + 1e-5) / (full_counts.sum() + 1e-5 * self.V)
+        self.log_bg = torch.tensor(np.log(word_probs), dtype=torch.float32).to(self.device)
+
+        role_mask = torch.zeros(self.R, self.V, device=self.device)
+        for r_name, r_idx in self.r_map.items():
+            valid_words = df[df['role'] == r_name]['w_idx'].unique()
+            valid_words = [int(w) for w in valid_words if 0 <= w < self.V]
+            role_mask[r_idx, valid_words] = 1.0
+        self.role_mask = role_mask
+
         if 'book' in df.columns and 'char_id' in df.columns:
             df["char_key"] = df["book"] + "_" + df["char_id"].astype(str)
         elif 'book' in df.columns and 'character_id' in df.columns:
             df["char_key"] = df["book"] + "_" + df["character_id"].astype(str)
         else:
-            # Fallback if book/id info is missing
             df["char_key"] = "char_" + df.index.astype(str)
-        
         return df
 
     def prepare_df(self, df):
-        """Map categorical columns to indices for model input."""
         df = df.copy()
-        if 'author' in df.columns:
-            df['m_idx'] = df['author'].map(self.m_map)
-        elif 'author_id' in df.columns:
-            df['m_idx'] = df['author_id']
-            
-        if 'char_key' in df.columns and hasattr(self, 'char_map'):
-            df['c_idx'] = df['char_key'].map(self.char_map)
-        elif 'character_id' in df.columns:
-            df['c_idx'] = df['character_id']
-            
-        if 'role' in df.columns:
-            df['r_idx'] = df['role'].map(self.r_map)
-            
-        # Drop rows with unmappable values (e.g. authors/chars not seen in fit if using maps)
+        if 'author' in df.columns: df['m_idx'] = df['author'].map(self.m_map)
+        elif 'author_id' in df.columns: df['m_idx'] = df['author_id']
+        if 'char_key' in df.columns and hasattr(self, 'char_map'): df['c_idx'] = df['char_key'].map(self.char_map)
+        elif 'character_id' in df.columns: df['c_idx'] = df['character_id']
+        if 'role' in df.columns: df['r_idx'] = df['role'].map(self.r_map)
         df = df.dropna(subset=['m_idx', 'c_idx', 'r_idx'])
         df['m_idx'] = df['m_idx'].astype(int)
         df['c_idx'] = df['c_idx'].astype(int)
@@ -234,63 +194,42 @@ class AdvancedLiterarySAGE:
     def fit(self, df, batch_size=8192, checkpoint_dir='data/results/checkpoints', 
             author_map_file=None, char_map_file=None, lr=1e-3, resume_path=None):
         import os
+        # Ensure absolute path for Windows robustness
+        checkpoint_dir = os.path.abspath(checkpoint_dir)
         os.makedirs(checkpoint_dir, exist_ok=True)
         
-        # 1. Base index mapping
         if not hasattr(self, 'm_map'):
-            if 'author_id' in df.columns and author_map_file:
-                df_auth = pd.read_csv(author_map_file)
-                self.m_map = dict(zip(df_auth['author_name'], df_auth['author_id']))
-                self.M = len(df_auth)
-            else:
-                authors = sorted(df["author"].unique())
-                self.m_map = {a: i for i, a in enumerate(authors)}
-                self.M = len(self.m_map)
-
-        if not hasattr(self, 'char_map') and not ('character_id' in df.columns):
+            authors = sorted(df["author"].unique())
+            self.m_map = {a: i for i, a in enumerate(authors)}
+            self.M = len(self.m_map)
+        if not hasattr(self, 'char_map'):
             char_keys = sorted(df["char_key"].unique())
             self.char_map = {ck: i for i, ck in enumerate(char_keys)}
             self.C = len(self.char_map)
-        elif 'character_id' in df.columns:
-            self.C = df['character_id'].max() + 1
-
         df = self.prepare_df(df)
 
-        # 1.1 Compute Role Mask
-        role_mask = torch.zeros(self.R, self.V, device=self.device)
-        for r_name, r_idx in self.r_map.items():
-            valid_words = df[df['role'] == r_name]['w_idx'].unique()
-            role_mask[r_idx, valid_words] = 1.0
-        self.role_mask = role_mask
-
-        # 2. Prepare Features
         char_word_counts = df.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
-        char_feats = np.zeros((self.C, self.V))
-        char_feats[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
-        char_feats = torch.tensor(char_feats, dtype=torch.float32).to(self.device)
+        char_feats_np = np.zeros((self.C, self.V))
+        for _, row in char_word_counts.iterrows():
+            c, w, cnt = int(row['c_idx']), int(row['w_idx']), row['count']
+            if c < self.C and w < self.V: char_feats_np[c, w] = cnt
+        
+        char_feats = torch.tensor(char_feats_np, dtype=torch.float32).to(self.device)
         char_feats = F.normalize(char_feats, p=2, dim=1)
 
-        # 3. Initialize Model
         if self.mode == 'cvae_flat':
-            self.model = SAGE_CVAE_Flat(self.V, self.M, self.P, self.R, role_mask=self.role_mask).to(self.device)
+            self.model = SAGE_CVAE_Flat(self.V, self.M, self.P, self.R, role_mask=self.role_mask, log_bg=self.log_bg).to(self.device)
         
-        # Resume if path provided
         start_iter = 0
         if resume_path and os.path.exists(resume_path):
-            print(f">>> Resuming from checkpoint: {resume_path}")
             checkpoint = torch.load(resume_path, map_location=self.device)
-            # Handle if it's a full checkpoint dict or just state_dict
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 self.model.load_state_dict(checkpoint['model_state_dict'])
                 start_iter = checkpoint.get('iteration', 0)
-            else:
-                self.model.load_state_dict(checkpoint)
+            else: self.model.load_state_dict(checkpoint)
         
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
-        if resume_path and os.path.exists(resume_path) and isinstance(checkpoint, dict) and 'optimizer_state_dict' in checkpoint:
-             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-        # 准备数据数组
+        
         all_m = torch.tensor(df['m_idx'].values, device=self.device)
         all_c = torch.tensor(df['c_idx'].values, device=self.device)
         all_r = torch.tensor(df['r_idx'].values, device=self.device)
@@ -298,70 +237,43 @@ class AdvancedLiterarySAGE:
         all_count = torch.tensor(df['count'].values, dtype=torch.float32, device=self.device)
 
         n_samples = len(df)
-        print(f">>> Training {self.mode} with {n_samples} samples (batch_size={batch_size})...")
-        pbar = tqdm(range(start_iter, self.iters))
-        
-        best_loss = float('inf')
+        print(f">>> Training {self.mode} with {n_samples} samples...")
+        pbar = tqdm(range(start_iter, self.iters), ascii=True) # Use ASCII for Windows console
         save_interval = max(1, self.iters // 10)
         
         for it in pbar:
             self.model.train()
             indices = torch.randperm(n_samples, device=self.device)
-            total_recon_loss, total_kl_loss, total_l1_loss, total_count = 0.0, 0.0, 0.0, 0.0
+            total_recon, n_tok = 0.0, 0.0
             temp = max(0.5, 1.0 * np.exp(-0.01 * it))
-            
             for start_idx in range(0, n_samples, batch_size):
                 end_idx = min(start_idx + batch_size, n_samples)
                 batch_idx = indices[start_idx:end_idx]
-                
-                batch_m, batch_c, batch_r, batch_w, batch_count = \
-                    all_m[batch_idx], all_c[batch_idx], all_r[batch_idx], all_w[batch_idx], all_count[batch_idx]
-                
+                b_m, b_c, b_r, b_w, b_cnt = all_m[batch_idx], all_c[batch_idx], all_r[batch_idx], all_w[batch_idx], all_count[batch_idx]
                 optimizer.zero_grad()
-                log_probs, persona_logits, z_persona = self.model(char_feats[batch_c], batch_m, batch_r, temp=temp)
-                
-                recon_loss = -torch.sum(log_probs[torch.arange(len(batch_w)), batch_w] * batch_count) / batch_count.sum()
-                p_soft = F.softmax(persona_logits, dim=-1)
+                log_probs, p_logits, z_pers = self.model(char_feats[b_c], b_m, b_r, temp=temp)
+                recon_loss = -torch.sum(log_probs[torch.arange(len(b_w)), b_w] * b_cnt) / b_cnt.sum()
+                p_soft = F.softmax(p_logits, dim=-1)
                 kl_loss = torch.sum(p_soft * (torch.log(p_soft + 1e-10) - torch.log(torch.tensor(1.0/self.P))), dim=-1).mean()
-                l1_loss = torch.sum(torch.abs(self.model.decoder.eta_author)) + torch.sum(torch.abs(self.model.decoder.eta_persona))
-                
+                l1_loss = self.model.decoder.eta_author.abs().mean() + self.model.decoder.eta_persona.abs().mean()
                 loss = recon_loss + 0.1 * kl_loss + self.l1_lambda * l1_loss
                 loss.backward()
                 optimizer.step()
-                
-                sum_c = batch_count.sum().item()
-                total_recon_loss += recon_loss.item() * sum_c
-                total_kl_loss += kl_loss.item() * sum_c
-                total_l1_loss += l1_loss.item() * sum_c
-                total_count += sum_c
-
-            avg_recon = total_recon_loss / total_count if total_count > 0 else 0
-            pbar.set_postfix({"Recon": f"{avg_recon:.4f}"})
+                batch_sum = b_cnt.sum().item()
+                total_recon += recon_loss.item() * batch_sum
+                n_tok += batch_sum
+            avg_recon = total_recon / n_tok
+            pers_std = self.model.decoder.eta_persona.std().item()
+            pbar.set_postfix({"Recon": f"{avg_recon:.4f}", "P_Std": f"{pers_std:.5f}"})
             
-            # Save Logic
-            checkpoint_data = {
-                'iteration': it + 1,
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_recon,
-            }
-
-            # 1. Always save latest
-            latest_path = os.path.join(checkpoint_dir, 'latest_model.pt')
-            torch.save(checkpoint_data, latest_path)
-
-            # 2. Save best based on reconstruction loss
-            if avg_recon < best_loss:
-                best_loss = avg_recon
-                best_path = os.path.join(checkpoint_dir, 'best_model.pt')
-                torch.save(checkpoint_data, best_path)
-            
-            # 3. Periodic snapshot
             if (it + 1) % save_interval == 0:
-                ckpt_path = os.path.join(checkpoint_dir, f'model_iter_{it+1}.pt')
-                torch.save(checkpoint_data, ckpt_path)
-
-        # Final persona assignment
+                os.makedirs(checkpoint_dir, exist_ok=True) # Defensive re-check
+                ckpt_file = os.path.join(checkpoint_dir, f'model_iter_{it+1}.pt')
+                try:
+                    torch.save(self.model.state_dict(), ckpt_file)
+                except Exception as e:
+                    print(f"Warning: Failed to save checkpoint at {ckpt_file}: {e}")
+                    
         self.model.eval()
         with torch.no_grad():
             self.p_assignments = torch.argmax(self.model.encoder(char_feats), dim=-1).cpu().numpy()
@@ -372,6 +284,4 @@ if __name__ == "__main__":
     parser.add_argument('--mode', type=str, default='cvae_flat', choices=['cvae_flat', 'huffman'])
     parser.add_argument('--iters', type=int, default=50)
     args = parser.parse_args()
-    
-    # 示例运行逻辑可参考测试脚本
     print(f"Initializing model in {args.mode} mode...")

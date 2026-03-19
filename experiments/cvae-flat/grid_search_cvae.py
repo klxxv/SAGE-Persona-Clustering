@@ -9,7 +9,7 @@ def run_grid_search():
     parser.add_argument("--start_p", type=int, default=5, help="Starting number of personas")
     parser.add_argument("--end_p", type=int, default=15, help="Ending number of personas (inclusive)")
     parser.add_argument("--iters", type=int, default=1000, help="Iterations per experiment")
-    parser.add_argument("--l1", type=float, default=1e-6, help="L1 penalty lambda")
+    parser.add_argument("--l1", type=float, default=1.0, help="L1 penalty lambda")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=8192, help="Batch size")
     parser.add_argument("--subset", type=int, default=None, help="Subset of characters (optional)")

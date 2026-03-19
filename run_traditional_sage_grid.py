@@ -13,8 +13,8 @@ def run_p_task(p_val, data_file, word_csv_file, output_root):
     
     model = LiteraryPersonaSAGE(
         n_personas=p_val,
-        em_iters=20, # Gibbs EM rounds
-        l1_lambda=1e-4, # Stronger L1 for sparsity
+        em_iters=100, # Gibbs EM rounds
+        l1_lambda=1.0, # Match paper (Laplace prior scale=1)
         min_mentions=0
     )
     
@@ -69,10 +69,10 @@ def main():
         word_csv_file = word_csv_temp
         print(f"    Real centroids computed for {len(centroids)} clusters (dim=100). Saved to {word_csv_temp}")
 
-    p_list = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    p_list = [8]
+    output_root = "checkpoints/test_traditional_fix"
+    os.makedirs(output_root, exist_ok=True)
     
-    # Start processes serially to avoid OOM or use a small pool
-    # Given data is small (153 chars), serial or pool of 4 is safe.
     for p in p_list:
         run_p_task(p, data_file, word_csv_file, output_root)
 
