@@ -267,7 +267,10 @@ class AdvancedLiterarySAGE:
                 n_tok += batch_sum
             
             avg_recon = total_recon / n_tok
-            pers_std = self.model.decoder.eta_persona.std().item()
+            # Monitor the sharpness of persona assignments (Std of probabilities)
+            with torch.no_grad():
+                p_probs = F.softmax(p_logits, dim=-1)
+                pers_std = p_probs.std().item()
             pbar.set_postfix({"Recon": f"{avg_recon:.4f}", "P_Std": f"{pers_std:.5f}"})
             
             os.makedirs(checkpoint_dir, exist_ok=True)

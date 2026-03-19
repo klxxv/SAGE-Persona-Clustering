@@ -337,8 +337,10 @@ class LiteraryPersonaSAGE:
         optimizer = OWLQN([{'params':[self.model.eta_meta, self.model.eta_pers], 'l1_lambda':effective_l1}, {'params':[self.model.eta_bg], 'l1_lambda':0.0}], lr=1.0)
         em_pbar = tqdm(range(start_iter, self.iters), desc=f"[EM P={self.P}]", ascii=True)
         best_loss = float('inf')
+        current_p_std = 0.0
         for it in em_pbar:
             if (it + 1) % 5 == 0: self.alpha = slice_sample_alpha(self.alpha, self.book_persona_counts, len(unique_books), self.P)
+            em_pbar.set_postfix({"Alpha": f"{self.alpha:.4f}", "P_Std": f"{current_p_std:.5f}"})
             self.model.train(); optimizer.reset_history()
             p_assignments_t = torch.from_numpy(self.p_assignments).to(self.device); ms_p_idx = p_assignments_t[ms_c_idx]
             def closure(backward=True):
@@ -382,6 +384,11 @@ class LiteraryPersonaSAGE:
                     probs_p = all_word_log_probs[m_idx_arr, p_idx, r_idx_arr, w_idx_arr]
                     ll_matrix[:, p_idx].index_add_(0, c_idx_arr, probs_p * counts_arr)
                 ll_matrix = ll_matrix.cpu().numpy()
+                # Sharpness of persona assignments (Std of posterior probabilities)
+                exp_ll = np.exp(ll_matrix - np.max(ll_matrix, axis=1, keepdims=True))
+                post_probs = exp_ll / np.sum(exp_ll, axis=1, keepdims=True)
+                current_p_std = np.std(post_probs)
+
                 from joblib import Parallel, delayed
                 def sample_single_book(book_id, b_ll_matrix, b_p_assignments, b_book_persona_counts, b_alpha, b_P):
                     char_indices = np.where(char_to_book == book_id)[0]
