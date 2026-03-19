@@ -17,22 +17,37 @@ def run_traditional_full(n_personas=8, em_iters=100, l1_lambda=1.0, subset_chars
     if word_csv is None: word_csv = "data/sage_cluster_dataset/bert_512/word2vec_clusters.csv"
     if data_file is None: data_file = "data/processed/sage_input_bert512.csv"
 
+    # Prepare Semantic Tree and get cluster vectors
     df_c = pd.read_csv(word_csv)
     if 'vector' not in df_c.columns:
         print(f">>> Computing {cluster_type} centroids for semantic tree...")
         df_vocab = pd.read_csv("data/processed/female_vocab_map.csv")
         emb_file = "data/processed/female_bert_pca100_embedding.csv" if cluster_type == "BERT" else "data/processed/female_word2vec_embedding.csv"
-        if not os.path.exists(emb_file): raise FileNotFoundError(f"Embedding file not found: {emb_file}")
         df_emb = pd.read_csv(emb_file)
         emb_col = None
         for col in ['bert_pca_100', 'word2vec_embedding', 'vector']:
             if col in df_emb.columns: emb_col = col; break
-        if emb_col is None: raise KeyError(f"No embedding column in {emb_file}")
         df_emb['vec_arr'] = df_emb[emb_col].apply(lambda x: np.array([float(v) for v in str(x).split(',')]))
         df_joined = df_vocab.merge(df_emb[['word_id', 'vec_arr']], on='word_id').merge(df_c[['word', 'cluster']], on='word')
         centroids = df_joined.groupby('cluster')['vec_arr'].apply(lambda x: np.mean(np.vstack(x.tolist()), axis=0)).to_dict()
         df_c['cluster_id'] = df_c['cluster']; df_c['vector'] = df_c['cluster'].map(lambda c: ','.join(f'{v:.6f}' for v in centroids[c]))
         word_csv = f"data/processed/temp_vectors_{label}.csv"; df_c.to_csv(word_csv, index=False)
+
+    # Re-read df_c to get vectors for metrics
+    df_c_with_vecs = pd.read_csv(word_csv)
+    # Extract [V, D] embeddings for clusters
+    v_clusters = sorted(df_c_with_vecs['cluster_id'].unique())
+    V = len(v_clusters)
+    # Get vector dimension from the first row
+    first_vec = np.array([float(v) for v in df_c_with_vecs.iloc[0]['vector'].split(',')])
+    D = len(first_vec)
+    vocab_embeddings = np.zeros((V, D), dtype=np.float32)
+    # Ensure correct index mapping based on model.cluster_map which is sorted v_clusters
+    cluster_to_idx = {c: i for i, c in enumerate(v_clusters)}
+    for _, row in df_c_with_vecs.drop_duplicates('cluster_id').iterrows():
+        idx = cluster_to_idx[row['cluster_id']]
+        vec = np.array([float(v) for v in row['vector'].split(',')])
+        vocab_embeddings[idx] = vec
 
     model = LiteraryPersonaSAGE(n_personas=n_personas, em_iters=em_iters, l1_lambda=l1_lambda, min_mentions=0)
     df_processed, num_nodes = model.load_and_preprocess_data(data_file, word_csv)
@@ -61,27 +76,17 @@ def run_traditional_full(n_personas=8, em_iters=100, l1_lambda=1.0, subset_chars
     print(">>> Performing Multi-dimensional Silhouette Analysis...")
     model.model.eval()
     with torch.no_grad():
-        # A. Raw Features (Normalized cluster counts)
         C = df_fit_mapped['c_idx'].max() + 1
-        V = len(model.vocab_clusters)
+        V_count = len(model.vocab_clusters)
         char_word_counts = df_fit_mapped.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
-        raw_features = np.zeros((C, V), dtype=np.float32)
+        raw_features = np.zeros((C, V_count), dtype=np.float32)
         raw_features[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
-        row_sums = raw_features.sum(axis=1, keepdims=True)
-        raw_features = np.divide(raw_features, row_sums, out=np.zeros_like(raw_features), where=row_sums!=0)
-
-        # B. Persona Probabilities (Actual soft probabilities from Gibbs/Likelihood)
-        # Using the saved posterior_probs from the model
+        
         persona_probs = model.posterior_probs
-        
-        # Calculate leaf-level eta_pers for each role: [P, R, V]
-        V_total = len(model.vocab_clusters)
         leaf_effects = (model.model.eta_pers[:, :, model.word_paths] * model.word_signs).sum(dim=3) # [P, R, V]
-        
-        # C. Persona Leaf Effects [P, V] (Averaged across roles)
         persona_effects = leaf_effects.mean(dim=1).detach().cpu().numpy()
         
-        scores = calculate_all_silhouettes(raw_features, persona_probs, persona_effects)
+        scores = calculate_all_silhouettes(raw_features, persona_probs, persona_effects, vocab_embeddings=vocab_embeddings)
         for k, v in scores.items():
             print(f"    {k:20s}: {v:.4f}")
 
@@ -89,8 +94,6 @@ def run_traditional_full(n_personas=8, em_iters=100, l1_lambda=1.0, subset_chars
     all_word_weights = []
     for p in range(n_personas):
         for r in range(model.R):
-            weights = persona_effects[p] # Uses averaged effects for simplicity here
-            # Or use role-specific weights from leaf_effects
             role_weights = leaf_effects[p, r].detach().cpu().numpy()
             top_idx = np.argsort(role_weights)[::-1][:15]
             for idx in top_idx:

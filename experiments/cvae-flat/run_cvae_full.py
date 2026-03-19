@@ -42,38 +42,45 @@ def run_full_cvae(n_personas=8, iters=1000, batch_size=8192, subset_chars=None, 
     
     torch.save(trainer.model.state_dict(), os.path.join(res_dir, "final_model.pt"))
 
-    # 1. Export Assignments
+    # Export Assignments
     df_results = trainer.char_info_df.copy()
     df_results["persona"] = trainer.p_assignments
     df_results.to_csv(os.path.join(res_dir, "char_assignments.csv"), index=False)
 
-    # 2. Comprehensive Silhouette Analysis
+    # Patch: Cross-matching for Filtered Semantic Analysis
+    print(">>> Preparing Semantic Cross-matching Patch...")
+    # Load embeddings for the 5076 words
+    emb_file = "data/processed/female_bert_pca100_embedding.csv"
+    df_emb = pd.read_csv(emb_file)
+    emb_dim = 100
+    vocab_embeddings = np.zeros((trainer.V, emb_dim), dtype=np.float32)
+    # Join with word_map to ensure correct index
+    df_vocab_map = pd.read_csv(word_csv)
+    df_joined = df_vocab_map.merge(df_emb, on='word_id')
+    for _, row in df_joined.iterrows():
+        w_id = int(row['word_id'])
+        if w_id < trainer.V:
+            vec = np.array([float(v) for v in row['bert_pca_100'].split(',')])
+            vocab_embeddings[w_id] = vec
+
     print(">>> Performing Multi-dimensional Silhouette Analysis...")
     trainer.model.eval()
     with torch.no_grad():
-        # Get raw features (normalized bow)
         C = train_df_mapped['c_idx'].max() + 1
         V = trainer.V
         char_word_counts = train_df_mapped.groupby(['c_idx', 'w_idx'])['count'].sum().reset_index()
         raw_features = np.zeros((C, V), dtype=np.float32)
         raw_features[char_word_counts['c_idx'], char_word_counts['w_idx']] = char_word_counts['count']
-        row_sums = raw_features.sum(axis=1, keepdims=True)
-        raw_features = np.divide(raw_features, row_sums, out=np.zeros_like(raw_features), where=row_sums!=0)
         
-        # Get persona probabilities
-        char_feats_tensor = torch.tensor(raw_features, dtype=torch.float32).to(trainer.device)
-        char_feats_tensor = F.normalize(char_feats_tensor, p=2, dim=1)
-        persona_probs = F.softmax(trainer.model.encoder(char_feats_tensor), dim=-1).cpu().numpy()
-        
-        # Get averaged persona effects [P, V]
-        # model.decoder.eta_persona is [P, R, V]
+        persona_probs = F.softmax(trainer.model.encoder(torch.tensor(F.normalize(torch.tensor(raw_features), p=2, dim=1)).to(trainer.device)), dim=-1).cpu().numpy()
         persona_effects = trainer.model.decoder.eta_persona.mean(dim=1).detach().cpu().numpy()
         
-        scores = calculate_all_silhouettes(raw_features, persona_probs, persona_effects)
+        # Calculate scores
+        scores = calculate_all_silhouettes(raw_features, persona_probs, persona_effects, vocab_embeddings=vocab_embeddings)
         for k, v in scores.items():
             print(f"    {k:20s}: {v:.4f}")
 
-    # 3. Extract Keywords
+    # Extract Keywords
     vocab = trainer.vocab
     role_names = {0: 'Agent', 1: 'Patient', 2: 'Possessive', 3: 'Predicative'}
     records = []
